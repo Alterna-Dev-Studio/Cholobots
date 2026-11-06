@@ -98,20 +98,18 @@ Obi Juan has a `Quest` model with notes/updates/assignments/payouts but no state
 
 Project #39 has one issue (#1 "Fix Overlapping Discord Pings", New, unassigned) and no stories, epics, sprints or wiki. The `slave1-codex` account got a 403 on project health, so it may lack some permissions. None of the five plan objectives is represented.
 
-### Proposed backlog (not created; for review)
+### Backlog filed (2026-11-06)
 
-Epics mapped 1:1 to plan objectives, with stories sized to the Friday windows:
-
-- **E1 Audit & stabilize current flows** — stories: drop stale `!greceipt` whitelist entry; add `on_command_error` + wrap Supabase calls in `to_thread`; `!mstopday` logs final block; unknown users must not fall back to Heaven; remove `!queso`; fix closeout status regression; write a manual test script per command with acceptance checks; close Taiga #1 with the redeploy/session root cause.
-- **E2 Natural-language task initiation** — one dispatcher listener; prototype "start working on X" → `!mtoday` focus with confirmation; usability notes.
-- **E3 Wearable notification MVP** — DM-based ping delivery; one controlled smartwatch test.
-- **E4 Multi-company isolation & onboarding** — tenant key design (guild_id vs org table); migrate tables + thread filter through every query; move off service-role or scope per request; verify RLS for mobile; profile/onboarding handler; fixture company for tests.
-- **E5 Quarterly guild quest** — quest state machine + KPIs; SACA pilot design doc.
+- **Issues #4–#20** — one per immediate bug above (Heaven fallback, time loss, closeout regression, receipt confirm hijack, $0 money input, chisme cancel, lead notes, AI summary, `!claim` race, CDN photo URLs, startup fragility, Obi Juan help/timestamps, timezones, phone dedupe, braindump W/H, mobile dashboards, help text). **#1** updated with the ping root cause.
+- **Epic #2 (this assessment)** — design stories #21–#30 (error handler, blocking I/O, single dispatcher, session persistence, atomic writes, one Supabase client, one clock, durable time records, financial engine, lookup helper) and testing stories #34 (unit tests), #36 (manual scripts).
+- **Epic #46 Developer experience** — #47 Supabase CLI local stack, #48 seed fixtures, #49 migration workflow, #50 bootstrap/task runner, #51 integration harness, #52 docs, plus #31 test Discord/env, #32 baseline migration, #33 pinning/lint, #35 CI. Foundational for everything else.
+- **Epic #3 Multi-business isolation** — #37 tenant model decision, #38 migration + backfill, #39 thread the filter, #40 profiles replace the person map, #41 per-business config, #42 off service-role key, #43 mobile RLS, #44 tenant-scoped sessions, #45 fixture second company + isolation test.
+- Not yet filed: natural-language dispatcher prototype (objective 2), wearable DM delivery (objective 3), website→Discord onboarding (rest of objective 4), quarterly quest state machine (objective 5).
 
 ## Recommended order for Nov 13
 
-1. ~~Merge `fix/crudobot-receipt-routing`~~ (done, PR #1); delete the stale `!greceipt` whitelist entry.
-2. Add `on_command_error` and a `run_db()` helper (`asyncio.to_thread`) and apply it in metichebot's loop and the chismebot summary call first.
-3. Fix the two data-integrity bugs with external-user impact: Heaven fallback (`metichebot.py:420,439`) and closeout status regression.
-4. Decide the tenant key before any objective-4 code; it changes every query.
-5. Seed Taiga with the epics above so the remaining Fridays are tracked.
+1. ~~Merge `fix/crudobot-receipt-routing`; delete the stale `!greceipt` entry; remove `!queso`~~ (done on branch `claude-init-assessment`).
+2. Devex first: #47 local Supabase stack and #32 baseline migration, so the rest can be tested without touching production.
+3. #21 `on_command_error` and #22 `run_db()` helper, applied to metichebot's loop and the chismebot summary call first.
+4. The two data-integrity bugs with external-user impact: #4 Heaven fallback and #6 closeout regression, each with an integration test (#51).
+5. #37 tenant-model decision before any multi-business code.
