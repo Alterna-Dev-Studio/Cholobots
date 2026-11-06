@@ -72,17 +72,15 @@ async def on_message(message: discord.Message):
         return
 
     # Allow attachments for approved Cholobot workflows.
-    # Guardabot uses attachments for receipts.
+    # Crudobot uses attachments for purchase/return receipts.
     # Vueltabot uses attachments for marketplace item photos.
     if message.attachments:
         content = (message.content or "").strip().lower()
 
-        attachment_commands = (
-            "!greceipt",
-            "!tengo",
-        )
+        attachment_commands = {"!greceipt", "!crudoreceipt", "!tengo"}
+        command_name = content.split(maxsplit=1)[0] if content else ""
 
-        if content.startswith(attachment_commands):
+        if command_name in attachment_commands:
             try:
                 await bot.process_commands(message)
 
@@ -106,7 +104,7 @@ async def on_message(message: discord.Message):
         await message.channel.send(
             "Órale homie, I saw the attachment. "
             "Right now photos/files are enabled for "
-            "`!greceipt` and `!tengo`."
+            "`!crudoreceipt` and `!tengo`."
         )
 
         return
