@@ -104,7 +104,9 @@ Project #39 has one issue (#1 "Fix Overlapping Discord Pings", New, unassigned) 
 - **Epic #2 (this assessment)** — design stories #21–#30 (error handler, blocking I/O, single dispatcher, session persistence, atomic writes, one Supabase client, one clock, durable time records, financial engine, lookup helper) and testing stories #34 (unit tests), #36 (manual scripts).
 - **Epic #46 Developer experience** — #47 Supabase CLI local stack, #48 seed fixtures, #49 migration workflow, #50 bootstrap/task runner, #51 integration harness, #52 docs, plus #31 test Discord/env, #32 baseline migration, #33 pinning/lint, #35 CI. Foundational for everything else.
 - **Epic #3 Multi-business isolation** — #37 tenant model decision, #38 migration + backfill, #39 thread the filter, #40 profiles replace the person map, #41 per-business config, #42 off service-role key, #43 mobile RLS, #44 tenant-scoped sessions, #45 fixture second company + isolation test.
-- Not yet filed: natural-language dispatcher prototype (objective 2), wearable DM delivery (objective 3), website→Discord onboarding (rest of objective 4), quarterly quest state machine (objective 5).
+- **Objective epics, not yet broken into stories** — #59 natural-language entry point (objective 2), #60 wearable notification MVP (3), #61 website→Discord onboarding (rest of 4), #62 quarterly guild quest (5). Each carries the plan text, what exists today, dependencies and candidate stories.
+- Additional issues filed after the first pass: #53–#57; story #58 (repository access and contribution agreement) under epic #46.
+- Per-bot deep dives are in the Taiga wiki (`home`, `deep-dive-*`, `repo-hygiene-2026-11-06`).
 
 ## Recommended order for Nov 13
 
