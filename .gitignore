@@ -4,3 +4,5 @@ __pycache__/
 *.pyc
 *.db
 .env
+.envrc
+.envrc.local
