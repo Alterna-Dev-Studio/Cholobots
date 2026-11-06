@@ -77,7 +77,7 @@ async def on_message(message: discord.Message):
     if message.attachments:
         content = (message.content or "").strip().lower()
 
-        attachment_commands = {"!greceipt", "!crudoreceipt", "!tengo"}
+        attachment_commands = {"!crudoreceipt", "!tengo"}
         command_name = content.split(maxsplit=1)[0] if content else ""
 
         if command_name in attachment_commands:
