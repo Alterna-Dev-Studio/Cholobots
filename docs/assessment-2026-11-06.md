@@ -15,7 +15,7 @@ Objective 1 (audit) can be mostly closed from this document plus a short live te
 ## Repo state
 
 - 222 commits, one author (two name spellings), 2026-03-11 → 2026-09-20 on `main`. No tags, no README, no tests/lint/CI, unpinned `requirements.txt`, no Python version pin (local is 3.14; deps are not installed system-wide).
-- **Unmerged fix:** `origin/fix/crudobot-receipt-routing` (eab4d51, 2026-10-31) is one commit to `cholobots.py` that adds `!crudoreceipt` to the attachment whitelist and matches on the first token. On `main`, `!crudoreceipt` is unreachable: the gate only passes `!greceipt` (a command that no longer exists anywhere) and `!tengo` (`cholobots.py:80-112`). Merge this first.
+- **Receipt routing fix merged 2026-11-06** (PR #1, `8f321ea`): the attachment gate now matches the first token against `{"!greceipt", "!crudoreceipt", "!tengo"}` (`cholobots.py:80-83`), so `!crudoreceipt` is reachable. `!greceipt` is still listed but no such command exists; drop it when `!queso` goes.
 - No secrets in history; `.env`/`*.db` never committed. The mobile repo ships a Supabase publishable key in six HTML files (expected for that key type; safety depends on RLS, which is in neither repo).
 - `db/database.py` SQLite layer is mostly dead (see CLAUDE.md). On a Procfile worker without a volume, `guardabot.db` is wiped on deploy, so `metiche_checkins` (the only live SQLite writer) is not durable anyway.
 
@@ -102,7 +102,7 @@ Project #39 has one issue (#1 "Fix Overlapping Discord Pings", New, unassigned) 
 
 Epics mapped 1:1 to plan objectives, with stories sized to the Friday windows:
 
-- **E1 Audit & stabilize current flows** — stories: merge receipt-routing branch + drop `!greceipt`; add `on_command_error` + wrap Supabase calls in `to_thread`; `!mstopday` logs final block; unknown users must not fall back to Heaven; remove `!queso`; fix closeout status regression; write a manual test script per command with acceptance checks; close Taiga #1 with the redeploy/session root cause.
+- **E1 Audit & stabilize current flows** — stories: drop stale `!greceipt` whitelist entry; add `on_command_error` + wrap Supabase calls in `to_thread`; `!mstopday` logs final block; unknown users must not fall back to Heaven; remove `!queso`; fix closeout status regression; write a manual test script per command with acceptance checks; close Taiga #1 with the redeploy/session root cause.
 - **E2 Natural-language task initiation** — one dispatcher listener; prototype "start working on X" → `!mtoday` focus with confirmation; usability notes.
 - **E3 Wearable notification MVP** — DM-based ping delivery; one controlled smartwatch test.
 - **E4 Multi-company isolation & onboarding** — tenant key design (guild_id vs org table); migrate tables + thread filter through every query; move off service-role or scope per request; verify RLS for mobile; profile/onboarding handler; fixture company for tests.
@@ -110,7 +110,7 @@ Epics mapped 1:1 to plan objectives, with stories sized to the Friday windows:
 
 ## Recommended order for Nov 13
 
-1. Merge `fix/crudobot-receipt-routing`; delete `!greceipt` references.
+1. ~~Merge `fix/crudobot-receipt-routing`~~ (done, PR #1); delete the stale `!greceipt` whitelist entry.
 2. Add `on_command_error` and a `run_db()` helper (`asyncio.to_thread`) and apply it in metichebot's loop and the chismebot summary call first.
 3. Fix the two data-integrity bugs with external-user impact: Heaven fallback (`metichebot.py:420,439`) and closeout status regression.
 4. Decide the tenant key before any objective-4 code; it changes every query.
