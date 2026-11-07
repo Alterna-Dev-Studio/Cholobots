@@ -19,11 +19,15 @@ info() { echo -e "${YELLOW}→ $1${NC}"; }
 
 FAILURES=0
 MOCK_DIR=""
+# setup_mock_curl runs once per case; remember every dir so the EXIT trap
+# removes all of them, not just the last one.
+MOCK_DIRS=()
 
 cleanup() {
-    if [ -n "$MOCK_DIR" ] && [ -d "$MOCK_DIR" ]; then
-        rm -rf "$MOCK_DIR"
-    fi
+    local dir
+    for dir in "${MOCK_DIRS[@]}"; do
+        [ -d "$dir" ] && rm -rf "$dir"
+    done
 }
 trap cleanup EXIT
 
@@ -31,7 +35,7 @@ trap cleanup EXIT
 # The mock uses MOCK_DIR files and a call log to verify API interactions.
 setup_mock_curl() {
     MOCK_DIR=$(mktemp -d "/tmp/test-taiga-merge-XXXXXX")
-    mkdir -p "$MOCK_DIR"
+    MOCK_DIRS+=("$MOCK_DIR")
 
     # Initialize call log
     echo -n "" > "$MOCK_DIR/curl_calls.log"
