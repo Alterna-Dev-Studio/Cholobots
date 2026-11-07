@@ -37,38 +37,43 @@ done
 : "${TAIGA_USERNAME:?TAIGA_USERNAME is required}"
 : "${TAIGA_PASSWORD:?TAIGA_PASSWORD is required}"
 
+# Credentials and comment text never go on a command line (readable via
+# /proc/<pid>/cmdline): request bodies are sent on stdin and the bearer header
+# is read by curl from a process substitution.
+AUTH_PAYLOAD=$(python3 -c 'import json, os; print(json.dumps({"type": "normal", "username": os.environ["TAIGA_USERNAME"], "password": os.environ["TAIGA_PASSWORD"]}))')
+auth_header() { printf 'Authorization: Bearer %s\n' "$TOKEN"; }
+
 # Authenticate
 AUTH_RESPONSE=$(curl -sf -X POST "${TAIGA_API_URL}/api/v1/auth" \
     -H "Content-Type: application/json" \
-    -d "{\"type\": \"normal\", \"username\": \"$TAIGA_USERNAME\", \"password\": \"$TAIGA_PASSWORD\"}")
+    -d @- <<<"$AUTH_PAYLOAD")
 
-TOKEN=$(echo "$AUTH_RESPONSE" | python3 -c "import json,sys; print(json.load(sys.stdin)['auth_token'])")
+TOKEN=$(python3 -c "import json,sys; print(json.load(sys.stdin)['auth_token'])" <<<"$AUTH_RESPONSE")
 
 # Get current version (required for PATCH)
 HTTP_CODE=$(curl -s -o "$TMPDIR_SCRIPT/item.json" -w "%{http_code}" \
     "${TAIGA_API_URL}/api/v1/${ITEM_TYPE}/${ITEM_ID}" \
-    -H "Authorization: Bearer $TOKEN")
+    -H @<(auth_header))
 
 if [[ "$HTTP_CODE" -ne 200 ]]; then
     echo "Failed to fetch item: HTTP $HTTP_CODE" >&2
     exit 1
 fi
 
-VERSION=$(python3 -c "import json; print(json.load(open('$TMPDIR_SCRIPT/item.json'))['version'])")
+VERSION=$(python3 -c "import json, sys; print(json.load(open(sys.argv[1]))['version'])" "$TMPDIR_SCRIPT/item.json")
 
-# Build JSON payload safely via sys.argv (no shell interpolation)
-COMMENT_JSON=$(python3 -c "
-import json, sys
-comment = sys.argv[1]
-version = int(sys.argv[2])
-print(json.dumps({'comment': comment, 'version': version}))
-" "$COMMENT" "$VERSION")
+# Build JSON payload via the environment (no shell interpolation, and the
+# comment text stays out of python3's argv)
+COMMENT_JSON=$(COMMENT="$COMMENT" VERSION="$VERSION" python3 -c "
+import json, os
+print(json.dumps({'comment': os.environ['COMMENT'], 'version': int(os.environ['VERSION'])}))
+")
 
 HTTP_CODE=$(curl -s -o "$TMPDIR_SCRIPT/response.json" -w "%{http_code}" \
     -X PATCH "${TAIGA_API_URL}/api/v1/${ITEM_TYPE}/${ITEM_ID}" \
-    -H "Authorization: Bearer $TOKEN" \
+    -H @<(auth_header) \
     -H "Content-Type: application/json" \
-    -d "$COMMENT_JSON")
+    -d @- <<<"$COMMENT_JSON")
 
 if [[ "$HTTP_CODE" -ne 200 ]]; then
     echo "Failed to post comment: HTTP $HTTP_CODE" >&2

@@ -124,9 +124,11 @@ case "$*" in
         if [[ -f "$MOCK_DIR/graphql_stderr.txt" ]]; then
             cat "$MOCK_DIR/graphql_stderr.txt" >&2
         fi
-        # Return review threads from mock file
+        # Return review threads from mock file. `gh api --paginate` prints one
+        # JSON document per page, so threads_page2.json is appended as page 2.
         if [[ -f "$MOCK_DIR/threads.json" ]]; then
             cat "$MOCK_DIR/threads.json"
+            if [[ -f "$MOCK_DIR/threads_page2.json" ]]; then cat "$MOCK_DIR/threads_page2.json"; fi
         else
             echo '{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[]}}}}}'
         fi
@@ -928,6 +930,52 @@ if [[ "$output" == "PENDING" ]]; then
     pass "Required context with no runs stays PENDING"
 else
     fail "Expected PENDING, got: $output"
+fi
+cleanup; MOCK_DIR=""
+
+# --- Test: review threads are paginated, an unresolved thread on page 2 blocks ---
+info "Test: unresolved thread beyond the first 100 blocks (paginated GraphQL)"
+setup_mock_gh
+write_threads_json '[
+    {"id":"T1","isResolved":true,"isOutdated":false,"comments":{"nodes":[{"author":{"login":"human-reviewer"}}]}}
+]'
+cat > "$MOCK_DIR/threads_page2.json" << 'EOF'
+{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[{"id":"T101","isResolved":false,"isOutdated":false,"comments":{"nodes":[{"author":{"login":"human-reviewer"}}]}}]}}}}}
+EOF
+output=$(run_monitor)
+if [[ "$output" == "COMMENTS_FOUND:1" ]]; then
+    pass "Unresolved thread on page 2 is counted"
+else
+    fail "Expected COMMENTS_FOUND:1, got: $output"
+fi
+if grep -q "api graphql --paginate" "$MOCK_DIR/gh_calls.log"; then
+    pass "GraphQL call uses --paginate"
+else
+    fail "GraphQL call must use --paginate"
+fi
+cleanup; MOCK_DIR=""
+
+# --- Test: a GraphQL page without a nodes array is an ERROR, never STABLE ---
+info "Test: GraphQL error payload yields ERROR rather than STABLE"
+setup_mock_gh
+echo '{"errors":[{"message":"rate limited"}]}' > "$MOCK_DIR/threads.json"
+output=$(run_monitor)
+if [[ "$output" == ERROR:* ]]; then
+    pass "Page without reviewThreads nodes produces a loud ERROR"
+else
+    fail "Expected ERROR:*, got: $output"
+fi
+cleanup; MOCK_DIR=""
+
+# --- Test: gh run list asks for more than its default 20 runs ---
+info "Test: gh run list passes an explicit high --limit"
+setup_mock_gh
+write_threads_json '[]'
+output=$(run_monitor)
+if grep "^run list" "$MOCK_DIR/gh_calls.log" | grep -q -- "--limit 1000"; then
+    pass "gh run list is called with --limit 1000"
+else
+    fail "Expected --limit 1000 on gh run list. Calls: $(cat "$MOCK_DIR/gh_calls.log")"
 fi
 cleanup; MOCK_DIR=""
 

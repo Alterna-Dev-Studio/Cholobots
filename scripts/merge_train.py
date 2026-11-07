@@ -28,11 +28,14 @@ then `python -m pytest -q tests --ignore=tests/scripts` once a unit-test suite e
 After a merge into main the mirror is synced with `git push origin main` (failure ignored).
 """
 
+import glob
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
+import tempfile
 import time
 from datetime import datetime, timezone
 
@@ -52,6 +55,10 @@ REMOTE = os.environ.get("MERGE_TRAIN_REMOTE", "upstream")
 
 # Post-rebase checks. Cholobots has no build step: the compile check always runs,
 # and pytest runs once a suite exists outside the helper-script tests (story #34).
+# gh pr list stops silently at --limit; discovery treats a full page as truncation.
+EPIC_PR_LIST_LIMIT = 1000
+# Upper bound for the all-states PR listing used to verify an integration PR's parents.
+PARENT_PR_LIST_LIMIT = 1000
 COMPILE_CHECK_CMD = "python -m py_compile cholobots.py config.py db/database.py bots/*.py"
 UNIT_TEST_CMD = "python -m pytest -q tests --ignore=tests/scripts"
 
@@ -456,21 +463,15 @@ def claim_story_ref(pr, refs, epic_ref):
     return None
 
 
-def discover_epic_prs(epic_ref, project_id=39):
-    """Build an ordered PR queue for an epic from its dependency diagram.
+def read_epic_dependencies(epic_ref, project_id=39):
+    """Read an epic and return the {story_ref: [parent refs]} map of its dependency diagram.
 
-    Reads the epic's description via ``scripts/taiga-story.sh <ref> <project> --epic``,
-    parses its ``## Dependency Diagram`` with lib.dependency_parser, matches every
-    story ref named in the diagram to the open PRs carrying that ref, and orders
-    the result topologically with order_prs_by_dependencies.
-
-    Raises RuntimeError rather than degrading: the queue's order comes from this
-    epic, and an unreadable epic or a missing diagram would otherwise land a
-    stack in arbitrary ref order, or queue every open PR in the repo. There is
-    deliberately no fallback to "every open PR carrying a Taiga ref".
+    Raises RuntimeError rather than degrading: the queue's order, and the check
+    that an integration PR's parents landed, both come from this epic, so an
+    unreadable epic or a missing diagram must stop the caller.
     """
     rc, stdout, stderr = run_cmd(
-        f"scripts/taiga-story.sh {epic_ref} {project_id} --epic",
+        f"scripts/taiga-story.sh {_q(epic_ref)} {_q(project_id)} --epic",
         check=False,
     )
     if rc == TAIGA_NOT_FOUND_EXIT:
@@ -500,8 +501,26 @@ def discover_epic_prs(epic_ref, project_id=39):
             f"explicit PR numbers."
         )
 
+    return deps
+
+
+def discover_epic_prs(epic_ref, project_id=39):
+    """Build an ordered PR queue for an epic from its dependency diagram.
+
+    Reads the epic's description via ``scripts/taiga-story.sh <ref> <project> --epic``,
+    parses its ``## Dependency Diagram`` with lib.dependency_parser, matches every
+    story ref named in the diagram to the open PRs carrying that ref, and orders
+    the result topologically with order_prs_by_dependencies.
+
+    Raises RuntimeError rather than degrading: the queue's order comes from this
+    epic, and an unreadable epic or a missing diagram would otherwise land a
+    stack in arbitrary ref order, or queue every open PR in the repo. There is
+    deliberately no fallback to "every open PR carrying a Taiga ref".
+    """
+    deps = read_epic_dependencies(epic_ref, project_id)
+
     rc, stdout, stderr = run_cmd(
-        gh_cmd("pr list --state open --json number,title,headRefName,body --limit 100"),
+        gh_cmd(f"pr list --state open --json number,title,headRefName,body --limit {EPIC_PR_LIST_LIMIT}"),
         check=False,
     )
     if rc != 0:
@@ -510,6 +529,15 @@ def discover_epic_prs(epic_ref, project_id=39):
         all_prs = json.loads(stdout)
     except json.JSONDecodeError as exc:
         raise RuntimeError(f"Unparseable PR list: {stdout[:200]}") from exc
+
+    if len(all_prs) >= EPIC_PR_LIST_LIMIT:
+        # gh stops at --limit without saying so; a truncated list would silently
+        # drop an epic PR from the queue. Fail closed instead.
+        raise RuntimeError(
+            f"The open-PR listing reached its {EPIC_PR_LIST_LIMIT}-PR limit, so it may be "
+            f"incomplete. Epic mode refuses to build a queue from a possibly truncated "
+            f"list; pass explicit PR numbers instead."
+        )
 
     # Every ref the diagram names, whether as a node or as a dependency.
     refs = set(deps) | {dep for dep_list in deps.values() for dep in dep_list}
@@ -561,6 +589,61 @@ def discover_epic_prs(epic_ref, project_id=39):
         }
         for pr in ordered
     ]
+
+
+def story_pr_landed(ref):
+    """True only when story ``ref`` has a MERGED PR and no PR still open.
+
+    Fails closed: a failed or unparseable listing, a story with no PR at all,
+    and a story whose only PRs were closed unmerged all answer False. A PR is
+    attributed to the story with extract_taiga_ref (branch, then title/body),
+    and integration PRs never count as a story's own PR.
+    """
+    rc, stdout, _ = run_cmd(
+        gh_cmd(f"pr list --state all --limit {PARENT_PR_LIST_LIMIT} "
+               "--json number,state,title,headRefName,body"),
+        check=False,
+    )
+    if rc != 0:
+        return False
+    try:
+        listed = json.loads(stdout)
+    except ValueError:
+        return False
+    states = set()
+    for pr in listed:
+        branch = pr.get("headRefName", "") or ""
+        if parse_integration_branch(branch) is not None:
+            continue
+        if extract_taiga_ref(branch, pr.get("title", "") or "", pr.get("body", "") or "") == ref:
+            states.add(pr.get("state"))
+    return "MERGED" in states and "OPEN" not in states
+
+
+def unlanded_integration_parents(branch):
+    """The parent story refs of an integration PR that have not landed, or None.
+
+    The integration branch was built by merging every parent's branch, so
+    merging it before a parent lands would put that parent's unreviewed
+    commits on the target. The parents are the story's entries in its epic's
+    dependency diagram (the branch names both the epic and the story). An empty
+    list means every parent landed; None means the parents could not be
+    determined, which the caller must treat as a failure to verify.
+    """
+    parsed = parse_integration_branch(branch)
+    if parsed is None:
+        return None
+    epic_ref, story_ref = parsed
+    try:
+        deps = read_epic_dependencies(epic_ref)
+    except RuntimeError as exc:
+        log(f"Cannot read parents of integration branch {branch}: {exc}")
+        return None
+    parents = deps.get(story_ref)
+    if not parents:
+        log(f"Epic #{epic_ref} declares no parents for story #{story_ref}")
+        return None
+    return [ref for ref in sorted(parents) if not story_pr_landed(ref)]
 
 
 def generate_summary(state):
@@ -624,10 +707,19 @@ def log(msg):
 
 
 def run_cmd(cmd, check=True, capture=True):
-    """Run a shell command, returning (returncode, stdout, stderr)."""
+    """Run a command, returning (returncode, stdout, stderr).
+
+    A string is split with shlex and run WITHOUT a shell, so a branch name or Taiga
+    status that contains ``;``, ``$(...)`` or quotes (all legal in git refs or
+    Taiga data) can never become a second command. Callers interpolating
+    externally supplied text into a string must wrap it in ``shlex.quote``
+    (``_q``); wildcards are not expanded, use ``expand_globs``.
+    """
+    if isinstance(cmd, str):
+        cmd = shlex.split(cmd)
     result = subprocess.run(
         cmd,
-        shell=isinstance(cmd, str),
+        shell=False,
         capture_output=capture,
         text=True,
     )
@@ -636,6 +728,20 @@ def run_cmd(cmd, check=True, capture=True):
             result.returncode, cmd, result.stdout, result.stderr
         )
     return result.returncode, result.stdout.strip() if result.stdout else "", result.stderr.strip() if result.stderr else ""
+
+
+def _q(text):
+    """Shell-quote one externally supplied value for a run_cmd command string."""
+    return shlex.quote(str(text))
+
+
+def expand_globs(argv):
+    """Expand wildcard tokens in an argv list the way a shell would (no match -> kept)."""
+    out = []
+    for token in argv:
+        matches = sorted(glob.glob(token)) if any(c in token for c in "*?[") else []
+        out.extend(matches or [token])
+    return out
 
 
 def gh_cmd(args):
@@ -659,7 +765,10 @@ def has_unit_tests(root="."):
 
 def run_build_checks():
     """Run the post-rebase checks; return (rc, stdout, stderr) of the first failure or the last run."""
-    rc, out, err = run_cmd(COMPILE_CHECK_CMD, check=False)
+    # No shell runs the command, so expand bots/*.py here and hand run_cmd a
+    # fully quoted string.
+    compile_cmd = " ".join(_q(a) for a in expand_globs(shlex.split(COMPILE_CHECK_CMD)))
+    rc, out, err = run_cmd(compile_cmd, check=False)
     if rc != 0 or not has_unit_tests():
         return rc, out, err
     return run_cmd(UNIT_TEST_CMD, check=False)
@@ -824,7 +933,7 @@ def find_open_children(branch):
     if not branch:
         return True, []
     rc, stdout, _ = run_cmd(
-        gh_cmd(f"pr list --base {branch} --state open --limit {OPEN_CHILDREN_LIMIT} "
+        gh_cmd(f"pr list --base {_q(branch)} --state open --limit {OPEN_CHILDREN_LIMIT} "
         f"--json number -q '.[].number'"),
         check=False,
     )
@@ -888,7 +997,7 @@ def restore_children_base(sm, children, branch):
     unresolvable = []
     for child in children:
         log(f"Restoring child PR {child} to base {branch} -- its parent did not land")
-        rc, _, stderr = run_cmd(gh_cmd(f"pr edit {child} --base {branch}"), check=False)
+        rc, _, stderr = run_cmd(gh_cmd(f"pr edit {child} --base {_q(branch)}"), check=False)
         if rc != 0:
             log(f"Could not restore PR {child} to base {branch}: {stderr[:200]}")
             child_index = sm.index_of(child)
@@ -900,11 +1009,12 @@ def restore_children_base(sm, children, branch):
                 )
             else:
                 run_cmd(
-                    gh_cmd(f'pr comment {child} --body "Merge train: could not restore this PR'
-                    f" to base {branch} after its parent failed to land. It is still based on"
-                    f" the train's target, not {branch}, and was never part of this train's own"
-                    f" queue, so the train has no way to track or automatically fix this."
-                    f' Do NOT merge until its base is verified manually."'),
+                    gh_cmd(f"pr comment {child} --body " + _q(
+                        f"Merge train: could not restore this PR"
+                        f" to base {branch} after its parent failed to land. It is still based on"
+                        f" the train's target, not {branch}, and was never part of this train's own"
+                        f" queue, so the train has no way to track or automatically fix this."
+                        f" Do NOT merge until its base is verified manually.")),
                     check=False,
                 )
                 unresolvable.append(child)
@@ -941,7 +1051,7 @@ def branch_merged_on_remote(branch, target):
     if not branch:
         return False
     rc, stdout, _ = run_cmd(
-        gh_cmd(f"pr list --head {branch} --state all --limit 2 --json state,baseRefName "
+        gh_cmd(f"pr list --head {_q(branch)} --state all --limit 2 --json state,baseRefName "
         "-q '.[] | .state + \"\\t\" + .baseRefName'"),
         check=False,
     )
@@ -956,7 +1066,7 @@ def branch_contained_in_target(branch, target):
     Two-dot, not three-dot: a parent merged with --squash leaves its commits
     out of the target's ancestry, so a merge-base diff still reports its files.
     """
-    rc, _, _ = run_cmd(f"git diff --quiet {REMOTE}/{target} {REMOTE}/{branch}", check=False)
+    rc, _, _ = run_cmd(f"git diff --quiet {_q(f"{REMOTE}/{target}")} {_q(f"{REMOTE}/{branch}")}", check=False)
     return rc == 0
 
 
@@ -1126,8 +1236,9 @@ def process_pr(sm, index, target, state_path):
     if parse_integration_branch(branch) and branch_contained_in_target(branch, target):
         log(f"Integration PR #{pr_num} adds nothing to {target}; closing as already landed")
         run_cmd(
-            gh_cmd(f'pr close {pr_num} --comment "Merge train closed this integration PR -- '
-            f'every parent branch it merged has landed on {target}, so it carries no remaining diff."'),
+            gh_cmd(f"pr close {pr_num} --comment " + _q(
+                "Merge train closed this integration PR -- "
+                f"every parent branch it merged has landed on {target}, so it carries no remaining diff.")),
             check=False,
         )
         # Proven contained above, so the child PR based on this branch may safely
@@ -1168,7 +1279,7 @@ def process_pr(sm, index, target, state_path):
     new_base = decide_retarget(pr, landed, target)
     if new_base:
         log(f"Retargeting PR #{pr_num} from {pr['base']} at {new_base}")
-        rc, _, stderr = run_cmd(gh_cmd(f"pr edit {pr_num} --base {new_base}"), check=False)
+        rc, _, stderr = run_cmd(gh_cmd(f"pr edit {pr_num} --base {_q(new_base)}"), check=False)
         if rc != 0:
             sm.update_pr(index, status="failed", error=f"retarget to {new_base} failed: {stderr[:200]}")
             sm.advance()
@@ -1204,6 +1315,18 @@ def process_pr(sm, index, target, state_path):
     # exempted from this check.
     if parse_integration_branch(branch) is not None:
         log(f"PR #{pr_num} is a synthetic integration PR; bypassing Taiga status gate")
+        # It has no Taiga item to gate on, so the gate it needs instead is that
+        # every parent it merged has itself landed.
+        unlanded = unlanded_integration_parents(branch)
+        if unlanded is None or unlanded:
+            reason = (
+                "could not verify that the integration PR's parent stories landed"
+                if unlanded is None else
+                "parent stories not merged yet: " + ", ".join(f"#{r}" for r in unlanded)
+            )
+            sm.update_pr(index, status="skipped", error=reason)
+            sm.advance()
+            return EXIT_OK
     else:
         log(f"Checking Taiga status for PR #{pr_num}...")
         taiga_ref = extract_taiga_ref(branch, pr["title"], pr.get("body", ""))
@@ -1211,7 +1334,7 @@ def process_pr(sm, index, target, state_path):
             sm.update_pr(index, status="skipped", error="no Taiga item reference found in PR")
             sm.advance()
             run_cmd(
-                gh_cmd(f'pr comment {pr_num} --body "Merge train skipped this PR -- could not find a Taiga story or bug reference in the branch name, title, or body. Add #<ref> to the PR title and re-queue."'),
+                gh_cmd(f"pr comment {pr_num} --body " + _q("Merge train skipped this PR -- could not find a Taiga story or bug reference in the branch name, title, or body. Add #<ref> to the PR title and re-queue.")),
                 check=False,
             )
             return EXIT_OK
@@ -1226,7 +1349,7 @@ def process_pr(sm, index, target, state_path):
             sm.update_pr(index, status="skipped", error=f"Taiga item #{taiga_ref} not found in project")
             sm.advance()
             run_cmd(
-                gh_cmd(f'pr comment {pr_num} --body "Merge train skipped this PR -- Taiga item #{taiga_ref} was not found as either a user story or issue. Verify the ref number and re-queue."'),
+                gh_cmd(f"pr comment {pr_num} --body " + _q(f"Merge train skipped this PR -- Taiga item #{taiga_ref} was not found as either a user story or issue. Verify the ref number and re-queue.")),
                 check=False,
             )
             return EXIT_OK
@@ -1235,7 +1358,7 @@ def process_pr(sm, index, target, state_path):
             sm.update_pr(index, status="skipped", error=f"Taiga item #{taiga_ref} not in Done/Closed status (current: {status_name})")
             sm.advance()
             run_cmd(
-                gh_cmd(f'pr comment {pr_num} --body "Merge train skipped this PR -- Taiga item #{taiga_ref} is in \'{status_name}\' status (expected: Done/Closed). Move the item to Done after review, then re-queue."'),
+                gh_cmd(f"pr comment {pr_num} --body " + _q(f"Merge train skipped this PR -- Taiga item #{taiga_ref} is in '{status_name}' status (expected: Done/Closed). Move the item to Done after review, then re-queue.")),
                 check=False,
             )
             return EXIT_OK
@@ -1300,7 +1423,7 @@ def process_pr(sm, index, target, state_path):
         return EXIT_REMEDIATION
 
     # 3d. Checkout branch and rebase onto target (if needed)
-    rc, _, checkout_stderr = run_cmd(f"git checkout {branch}", check=False)
+    rc, _, checkout_stderr = run_cmd(f"git checkout {_q(branch)}", check=False)
     if rc != 0:
         err_detail = checkout_stderr.strip()
         if "is already checked out at" in err_detail:
@@ -1319,7 +1442,7 @@ def process_pr(sm, index, target, state_path):
     # cannot fast-forward such a branch and would knock a green PR out of the
     # train (bug #2166).  The reset discards only a rebase that is re-derived
     # below, so it is safe to repeat on every resume.
-    rc, remote_head, stderr = run_cmd(f"git rev-parse {REMOTE}/{branch}", check=False)
+    rc, remote_head, stderr = run_cmd(f"git rev-parse {_q(f'{REMOTE}/{branch}')}", check=False)
     if rc != 0:
         log(f"git rev-parse {REMOTE}/{branch} failed: {stderr.strip()}")
         sm.update_pr(index, status="failed", error=f"{REMOTE}/{branch} not found: {stderr.strip() or 'non-zero exit code'}")
@@ -1334,7 +1457,7 @@ def process_pr(sm, index, target, state_path):
             f"recoverable from the reflog at {local_head}."
         )
 
-    rc, _, stderr = run_cmd(f"git reset --hard {REMOTE}/{branch}", check=False)
+    rc, _, stderr = run_cmd(f"git reset --hard {_q(f'{REMOTE}/{branch}')}", check=False)
     if rc != 0:
         log(f"git reset --hard {REMOTE}/{branch} failed: {stderr.strip()}")
         sm.update_pr(index, status="failed", error=f"git reset --hard {REMOTE}/{branch} failed: {stderr.strip() or 'non-zero exit code'}")
@@ -1343,7 +1466,7 @@ def process_pr(sm, index, target, state_path):
 
     # Check if branch is already up-to-date with target.
     # git merge-base --is-ancestor exits 0 (is ancestor), 1 (not ancestor), or 128 (error).
-    rc, _, stderr = run_cmd(f"git merge-base --is-ancestor {REMOTE}/{target} HEAD", check=False)
+    rc, _, stderr = run_cmd(f"git merge-base --is-ancestor {_q(f'{REMOTE}/{target}')} HEAD", check=False)
     if rc == 0:
         log(f"PR #{pr_num} is already up-to-date with {REMOTE}/{target}, skipping rebase")
     elif rc != 1:
@@ -1368,9 +1491,9 @@ def process_pr(sm, index, target, state_path):
         _, pre_rebase_ref, _ = run_cmd("git rev-parse HEAD", check=False)
 
         if is_integration:
-            rc, _, stderr = run_cmd(f"git merge {REMOTE}/{target} --no-edit", check=False)
+            rc, _, stderr = run_cmd(f"git merge {_q(f'{REMOTE}/{target}')} --no-edit", check=False)
         else:
-            rc, _, stderr = run_cmd(f"git rebase {REMOTE}/{target}", check=False)
+            rc, _, stderr = run_cmd(f"git rebase {_q(f'{REMOTE}/{target}')}", check=False)
         if rc != 0:
             # Merge/rebase conflicts detected
             log(f"{'Merge' if is_integration else 'Rebase'} conflicts detected for PR #{pr_num}")
@@ -1408,11 +1531,11 @@ def process_pr(sm, index, target, state_path):
         # this ignores binary files, unrelated tracked files, and string literals
         # that happen to contain the marker characters.
         rc, markers, _ = run_cmd(
-            f"git diff --check {REMOTE}/{target}...HEAD", check=False
+            f"git diff --check {_q(f'{REMOTE}/{target}')}...HEAD", check=False
         )
         if rc != 0 and markers:
             log(f"Conflict markers found:\n{markers}")
-            run_cmd(f"git reset --hard {pre_rebase_ref}", check=False)
+            run_cmd(f"git reset --hard {_q(pre_rebase_ref)}", check=False)
             sm.update_pr(index, status="failed", error="conflict markers remain after rebase")
             sm.advance()
             return EXIT_OK
@@ -1444,7 +1567,7 @@ def process_pr(sm, index, target, state_path):
 
         # 3e. Force-push the rebased branch
         log(f"Force-pushing PR #{pr_num}...")
-        rc, _, stderr = run_cmd(f"git push --force-with-lease {REMOTE} {branch}", check=False)
+        rc, _, stderr = run_cmd(f"git push --force-with-lease {REMOTE} {_q(branch)}", check=False)
         if rc != 0:
             sm.update_pr(index, status="failed", error="force-push rejected")
             sm.advance()
@@ -1525,7 +1648,7 @@ def process_pr(sm, index, target, state_path):
             f"Retargeting child PR #{child} from {branch} at {target} "
             f"before merging PR #{pr_num}"
         )
-        rc, _, stderr = run_cmd(gh_cmd(f"pr edit {child} --base {target}"), check=False)
+        rc, _, stderr = run_cmd(gh_cmd(f"pr edit {child} --base {_q(target)}"), check=False)
         if rc != 0:
             # Fail this PR rather than merge anyway: an unlanded parent is
             # recoverable, a closed child is not -- GitHub refuses to reopen
@@ -1694,8 +1817,8 @@ def process_pr(sm, index, target, state_path):
     sm.advance()
 
     # Update local target branch
-    run_cmd(f"git checkout {target}", check=False)
-    run_cmd(f"git pull {REMOTE} {target}", check=False)
+    run_cmd(f"git checkout {_q(target)}", check=False)
+    run_cmd(f"git pull {REMOTE} {_q(target)}", check=False)
     if target == "main":
         # origin (Alterna-Dev-Studio/Cholobots) is only a mirror; keep its main in
         # step when it is configured. A failure here never affects the train.
@@ -1730,6 +1853,7 @@ def main():
                 sys.exit(EXIT_ERROR)
             # Fetch PR details from GitHub
             prs = []
+            lookup_failures = []
             for pr_num in args.pr_numbers:
                 rc, stdout, stderr = run_cmd(
                     gh_cmd(f"pr view {pr_num} --json number,title,headRefName,baseRefName,state,url,body"),
@@ -1737,8 +1861,14 @@ def main():
                 )
                 if rc != 0:
                     log(f"Failed to fetch PR #{pr_num}: {stderr}")
+                    lookup_failures.append(pr_num)
                     continue
-                pr_data = json.loads(stdout)
+                try:
+                    pr_data = json.loads(stdout)
+                except ValueError:
+                    log(f"Unparseable response for PR #{pr_num}: {stdout[:200]}")
+                    lookup_failures.append(pr_num)
+                    continue
                 if pr_data.get("state") != "OPEN":
                     log(f"PR #{pr_num} is {pr_data.get('state', 'unknown')} — skipped")
                     continue
@@ -1749,6 +1879,15 @@ def main():
                     "body": pr_data.get("body", ""),
                     "base": pr_data.get("baseRefName", args.target),
                 })
+            if lookup_failures:
+                # A transient gh or auth failure must not look like an empty,
+                # successful train, or silently drop one PR from a stack.
+                log(
+                    "Could not look up requested PR(s) "
+                    + ", ".join(f"#{n}" for n in lookup_failures)
+                    + "; refusing to start a partial train"
+                )
+                sys.exit(EXIT_ERROR)
         else:
             log(f"Epic mode: discovering PRs for epic #{args.epic_ref}")
             try:
@@ -1768,7 +1907,10 @@ def main():
             sys.exit(EXIT_OK)
 
         ts = int(time.time())
-        state_path = f"/tmp/merge-train-{ts}.json"
+        # mkstemp makes the name unique and the file private (0600), so two
+        # trains started in the same second cannot share or overwrite state.
+        fd, state_path = tempfile.mkstemp(prefix=f"merge-train-{ts}-", suffix=".json", dir="/tmp")
+        os.close(fd)
         sm = StateManager(state_path)
         sm.init(prs, target=args.target)
         log(f"State file: {state_path}")

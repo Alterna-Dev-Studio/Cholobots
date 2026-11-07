@@ -980,6 +980,36 @@ def _pr_view_response(state, base="main", pr_num=42):
     )
 
 
+INTEGRATION_EPIC_DESCRIPTION = """## Dependency Diagram
+
+```
+#100 (A)
+  └─► #2748 (Child)
+#101 (B)
+  └─► #2748 (Child)
+```
+"""
+
+
+def _all_prs_payload(entries):
+    """Build a `gh pr list --state all --json number,state,title,headRefName,body` payload."""
+    return json.dumps([
+        {"number": n, "state": state, "title": title, "headRefName": branch, "body": ""}
+        for n, state, title, branch in entries
+    ])
+
+
+def _integration_parents_landed_responses():
+    """Canned replies for the integration PR's parent check: both parents MERGED."""
+    return [
+        ("--epic", (0, _epic_json(INTEGRATION_EPIC_DESCRIPTION), "")),
+        ("pr list --state all", (0, _all_prs_payload([
+            (11, "MERGED", "feat: a (#100)", "feature/a-100"),
+            (12, "MERGED", "feat: b (#101)", "feature/b-101"),
+        ]), "")),
+    ]
+
+
 def _taiga_done_response():
     """Canned `scripts/taiga-story.sh` reply for an item in a closed (Done) status."""
     return ("scripts/taiga-story.sh", (0, json.dumps({
@@ -1247,6 +1277,7 @@ class TestIntegrationBranchMergedForward:
             ("git fetch upstream", (0, "", "")),
             _pr_view_response("OPEN"),
             ("git diff --quiet", (1, "", "")),  # real diff remains: not contained
+            *_integration_parents_landed_responses(),
             ("gh pr view 42 --json state -q .state", (0, "MERGED", "")),
             ("--json baseRefName", (0, "main", "")),
             ("monitor-pr-stability.sh", (0, "STABLE", "")),
@@ -2496,6 +2527,7 @@ class TestTaigaGateRunsBeforeCiAndRebase:
             ("git fetch upstream", (0, "", "")),
             _pr_view_response("OPEN"),
             ("git diff --quiet", (1, "", "")),  # real diff remains: not contained
+            *_integration_parents_landed_responses(),
             ("gh pr view 42 --json state -q .state", (0, "MERGED", "")),
             ("--json baseRefName", (0, "main", "")),
             ("monitor-pr-stability.sh", (0, "STABLE", "")),
@@ -2514,7 +2546,66 @@ class TestTaigaGateRunsBeforeCiAndRebase:
 
         assert result == EXIT_OK
         assert sm.state["prs"][0]["status"] == "merged"
-        assert not any("scripts/taiga-story.sh" in c for c in calls)
+        # No Taiga status gate for the synthetic PR; the only taiga-story.sh call
+        # is the epic read that names its parents.
+        assert [c for c in calls if "scripts/taiga-story.sh" in c] == [
+            "scripts/taiga-story.sh 2004 39 --epic"
+        ]
+
+    @pytest.mark.parametrize("parent_prs, expected", [
+        ([(11, "MERGED", "feat: a (#100)", "feature/a-100")], "#101"),
+        ([(11, "MERGED", "feat: a (#100)", "feature/a-100"),
+          (12, "OPEN", "feat: b (#101)", "feature/b-101")], "#101"),
+        ([(11, "MERGED", "feat: a (#100)", "feature/a-100"),
+          (12, "CLOSED", "feat: b (#101)", "feature/b-101")], "#101"),
+        ([], "#100, #101"),
+    ])
+    def test_integration_pr_with_unlanded_parent_is_skipped(self, monkeypatch, tmp_path, parent_prs, expected):
+        """Merging the integration PR would land a parent's unreviewed commits."""
+        state_path = str(tmp_path / "state.json")
+        branch = "epic/2004-integration-2748"
+        sm = _make_sm_for_process_pr(state_path, branch=branch)
+        fake_cmd, calls = _fake_run_cmd([
+            ("git fetch upstream", (0, "", "")),
+            _pr_view_response("OPEN"),
+            ("git diff --quiet", (1, "", "")),
+            ("--epic", (0, _epic_json(INTEGRATION_EPIC_DESCRIPTION), "")),
+            ("pr list --state all", (0, _all_prs_payload(parent_prs), "")),
+        ])
+        monkeypatch.setattr("merge_train.run_cmd", fake_cmd)
+
+        result = process_pr(sm, 0, "main", state_path)
+
+        assert result == EXIT_OK
+        assert sm.state["prs"][0]["status"] == "skipped"
+        assert expected in sm.state["prs"][0]["error"]
+        for forbidden in ("monitor-pr-stability.sh", "git checkout", "git push", "gh pr merge"):
+            assert not any(forbidden in c for c in calls), forbidden
+
+    @pytest.mark.parametrize("responses", [
+        [("--epic", (1, "", "Taiga down"))],
+        [("--epic", (0, _epic_json(INTEGRATION_EPIC_DESCRIPTION), "")),
+         ("pr list --state all", (1, "", "gh down"))],
+        [("--epic", (0, _epic_json(INTEGRATION_EPIC_DESCRIPTION), "")),
+         ("pr list --state all", (0, "not json", ""))],
+    ])
+    def test_integration_pr_fails_closed_when_parents_cannot_be_verified(self, monkeypatch, tmp_path, responses):
+        state_path = str(tmp_path / "state.json")
+        branch = "epic/2004-integration-2748"
+        sm = _make_sm_for_process_pr(state_path, branch=branch)
+        fake_cmd, calls = _fake_run_cmd([
+            ("git fetch upstream", (0, "", "")),
+            _pr_view_response("OPEN"),
+            ("git diff --quiet", (1, "", "")),
+        ] + responses)
+        monkeypatch.setattr("merge_train.run_cmd", fake_cmd)
+
+        result = process_pr(sm, 0, "main", state_path)
+
+        assert result == EXIT_OK
+        assert sm.state["prs"][0]["status"] == "skipped"
+        assert "parent" in sm.state["prs"][0]["error"]
+        assert not any("gh pr merge" in c for c in calls)
 
 
 class TestCheckoutFailure:
@@ -3310,7 +3401,10 @@ class TestBuildChecks:
         monkeypatch.setattr("merge_train.run_cmd", lambda cmd, check=True: calls.append(cmd) or (1, "", "boom"))
         monkeypatch.setattr("merge_train.has_unit_tests", lambda root=".": True)
         assert run_build_checks() == (1, "", "boom")
-        assert calls == ["python -m py_compile cholobots.py config.py db/database.py bots/*.py"]
+        assert len(calls) == 1
+        # No shell expands the wildcard, so run_build_checks does it.
+        assert calls[0].startswith("python -m py_compile cholobots.py config.py db/database.py ")
+        assert "bots/*.py" not in calls[0]
 
     def test_pytest_runs_only_when_unit_tests_exist(self, monkeypatch):
         calls = []
@@ -3321,3 +3415,97 @@ class TestBuildChecks:
         monkeypatch.setattr("merge_train.has_unit_tests", lambda root=".": True)
         run_build_checks()
         assert calls[-1] == "python -m pytest -q tests --ignore=tests/scripts"
+
+
+class TestRunCmdHasNoShell:
+    """A branch name is untrusted text: `;`, `$(...)` and quotes are all legal in git refs."""
+
+    def test_metacharacters_in_a_quoted_argument_stay_one_argument(self, tmp_path):
+        from merge_train import run_cmd, _q
+        marker = tmp_path / "pwned"
+        hostile = f"x; touch {marker}; $(touch {marker}) `touch {marker}` 'q\"d"
+        rc, out, _ = run_cmd(f"printf %s {_q(hostile)}")
+        assert rc == 0
+        assert out == hostile
+        assert not marker.exists()
+
+    def test_unquoted_metacharacters_are_not_interpreted(self, tmp_path):
+        from merge_train import run_cmd
+        marker = tmp_path / "pwned"
+        rc, out, _ = run_cmd(f"echo hi; touch {marker}", check=False)
+        assert not marker.exists()
+        assert out == f"hi; touch {marker}"
+
+    def test_branch_with_semicolon_reaches_git_as_a_single_argument(self, monkeypatch):
+        """End to end through process_pr's checkout: the hostile ref is quoted."""
+        import shlex
+        from merge_train import _q
+        branch = "feature/x;touch${IFS}pwned-42"
+        assert shlex.split(f"git checkout {_q(branch)}") == ["git", "checkout", branch]
+
+
+class TestExplicitTrainLookupFailure:
+    """A failed `gh pr view` must not make an explicit train look like a success."""
+
+    def _run_main(self, monkeypatch, responses, argv):
+        import merge_train
+        fake_cmd, calls = _fake_run_cmd(responses)
+        monkeypatch.setattr("merge_train.run_cmd", fake_cmd)
+        monkeypatch.setattr(sys, "argv", ["merge_train.py"] + argv)
+        with pytest.raises(SystemExit) as exc:
+            merge_train.main()
+        return exc.value.code, calls
+
+    def test_all_lookups_failing_exits_with_error(self, monkeypatch):
+        code, _ = self._run_main(monkeypatch, [("gh pr view", (1, "", "HTTP 502"))], ["41", "42"])
+        assert code == EXIT_ERROR
+
+    def test_one_lookup_failing_refuses_a_partial_train(self, monkeypatch):
+        view = json.dumps({"number": 41, "title": "t", "headRefName": "feature/a-41",
+                           "baseRefName": "main", "state": "OPEN", "url": "u", "body": ""})
+        code, calls = self._run_main(monkeypatch, [
+            ("pr view 41", (0, view, "")),
+            ("pr view 42", (1, "", "HTTP 502")),
+        ], ["41", "42"])
+        assert code == EXIT_ERROR
+        assert not any("git " in c for c in calls)
+
+    def test_unparseable_lookup_exits_with_error(self, monkeypatch):
+        code, _ = self._run_main(monkeypatch, [("gh pr view", (0, "<html>", ""))], ["41"])
+        assert code == EXIT_ERROR
+
+
+class TestEpicDiscoveryTruncation:
+    def test_full_page_of_open_prs_fails_closed(self, monkeypatch):
+        import merge_train
+        entries = [(n, f"feat (#{n})", f"feature/x-{n}", "") for n in range(1, merge_train.EPIC_PR_LIST_LIMIT + 1)]
+        fake_cmd, calls = _fake_run_cmd([
+            ("scripts/taiga-story.sh", (0, _epic_json(EPIC_DIAGRAM_DESCRIPTION), "")),
+            ("gh pr list", (0, _open_prs_payload(entries), "")),
+        ])
+        monkeypatch.setattr("merge_train.run_cmd", fake_cmd)
+        with pytest.raises(RuntimeError, match="limit"):
+            discover_epic_prs(2752)
+        assert f"--limit {merge_train.EPIC_PR_LIST_LIMIT}" in calls[1]
+
+
+class TestStatePathIsUnique:
+    def test_two_trains_in_the_same_second_get_distinct_state_files(self, monkeypatch):
+        import merge_train
+        paths = []
+        view = json.dumps({"number": 41, "title": "t #41", "headRefName": "feature/a-41",
+                           "baseRefName": "main", "state": "OPEN", "url": "u", "body": ""})
+        fake_cmd, _ = _fake_run_cmd([("pr view 41", (0, view, ""))])
+        monkeypatch.setattr("merge_train.run_cmd", fake_cmd)
+        monkeypatch.setattr("merge_train.time.time", lambda: 1700000000.0)
+        monkeypatch.setattr("merge_train.process_pr", lambda sm, i, t, sp: (paths.append(sp), sm.advance(), EXIT_OK)[2])
+        for _ in range(2):
+            monkeypatch.setattr(sys, "argv", ["merge_train.py", "41"])
+            with pytest.raises(SystemExit):
+                merge_train.main()
+        try:
+            assert len(set(paths)) == 2
+        finally:
+            for p in paths:
+                if os.path.exists(p):
+                    os.remove(p)

@@ -42,9 +42,6 @@ setup_mock_curl() {
 
 MOCK_DIR_LOCAL="$MOCK_DIR"
 
-# Log the call for assertions
-echo "$*" >> "$MOCK_DIR_LOCAL/curl_calls.log"
-
 # Parse args to find URL and data
 URL=""
 DATA=""
@@ -58,7 +55,8 @@ i=0
 while [ $i -lt ${#args[@]} ]; do
     case "${args[$i]}" in
         -X) i=$((i+1)); METHOD="${args[$i]}" ;;
-        -d) i=$((i+1)); DATA="${args[$i]}" ;;
+        # The script sends bodies on stdin (-d @-) so they stay out of argv.
+        -d) i=$((i+1)); DATA="${args[$i]}"; if [ "$DATA" = "@-" ]; then DATA=$(cat); fi ;;
         -o) i=$((i+1)); OUTPUT_FILE="${args[$i]}" ;;
         -w) i=$((i+1)); WRITE_OUT="${args[$i]}" ;;
         -s|-sf|-sS) SILENT=true ;;
@@ -67,6 +65,10 @@ while [ $i -lt ${#args[@]} ]; do
     esac
     i=$((i+1))
 done
+
+# Log the call (arguments plus any stdin body) for assertions
+echo "$* $DATA" >> "$MOCK_DIR_LOCAL/curl_calls.log"
+echo "$*" >> "$MOCK_DIR_LOCAL/curl_argv.log"
 
 # Route based on URL pattern
 case "$URL" in
@@ -872,6 +874,94 @@ EOF
 # ============================================================
 # Run all tests
 # ============================================================
+# ============================================================
+# Test: a non-404 story lookup failure is an error, not "try the issue endpoint"
+# (a 500 followed by an issue 404 must not end the run as a successful no-op)
+# ============================================================
+test_story_lookup_server_error_fails() {
+    info "Test: user story lookup HTTP 500 exits non-zero without syncing"
+    setup_mock_curl
+
+    export MOCK_USERSTORY_HTTP_CODE=500
+    export MOCK_ISSUE_HTTP_CODE=404
+
+    local output exit_code=0
+    output=$(PR_LABELS="mark-done-on-merge" run_script 536 1 "https://github.com/example/repo/pull/1" 2>&1) || exit_code=$?
+
+    if [ "$exit_code" -ne 0 ]; then
+        pass "Exits non-zero on story lookup HTTP 500"
+    else
+        fail "Expected non-zero exit on story HTTP 500, got 0. Output: $output"
+    fi
+
+    if grep -q "HTTP 500" <<< "$output"; then
+        pass "Error names the failing status"
+    else
+        fail "Expected 'HTTP 500' in output, got: $output"
+    fi
+
+    if [ "$(count_calls '/api/v1/issues/by_ref')" -eq 0 ]; then
+        pass "Issue endpoint was not tried after a non-404 story failure"
+    else
+        fail "Issue endpoint must not be tried after story HTTP 500"
+    fi
+
+    unset MOCK_USERSTORY_HTTP_CODE MOCK_ISSUE_HTTP_CODE
+}
+
+test_issue_lookup_server_error_fails() {
+    info "Test: issue lookup HTTP 500 (after a story 404) exits non-zero"
+    setup_mock_curl
+
+    export MOCK_USERSTORY_HTTP_CODE=404
+    export MOCK_ISSUE_HTTP_CODE=500
+
+    local output exit_code=0
+    output=$(run_script 536 1 "https://github.com/example/repo/pull/1" 2>&1) || exit_code=$?
+
+    if [ "$exit_code" -ne 0 ] && grep -q "HTTP 500" <<< "$output"; then
+        pass "Exits non-zero on issue lookup HTTP 500"
+    else
+        fail "Expected non-zero exit naming HTTP 500, got $exit_code. Output: $output"
+    fi
+
+    unset MOCK_USERSTORY_HTTP_CODE MOCK_ISSUE_HTTP_CODE
+}
+
+# ============================================================
+# Test: secrets and bodies stay off curl's argv; task listing is unpaginated
+# ============================================================
+test_credentials_and_bodies_not_in_argv() {
+    info "Test: password and bearer token never appear on a curl command line"
+    setup_mock_curl
+
+    export MOCK_USERSTORY_HTTP_CODE=200
+    cat > "$MOCK_DIR/userstory_response.json" << 'EOF'
+{"id":100,"ref":689,"subject":"Test story","status":76,"version":5,"is_closed":false,"status_extra_info":{"name":"New","is_closed":false}}
+EOF
+    PR_LABELS="mark-done-on-merge close-tasks-on-merge" run_script 536 1 "https://github.com/example/repo/pull/1" >/dev/null 2>&1 || true
+
+    # The mock logs argv followed by the stdin body, so split on the marker the
+    # mock cannot add: assert on argv alone via the recorded call prefix.
+    if grep -q "mock-token-123" "$MOCK_DIR/curl_argv.log"; then
+        fail "Bearer token found in curl argv"
+    else
+        pass "Bearer token is not in curl argv"
+    fi
+    if grep -q "testpass" "$MOCK_DIR/curl_argv.log"; then
+        fail "Password found in curl argv"
+    else
+        pass "Password is not in curl argv"
+    fi
+    if grep -q "x-disable-pagination: True" <<< "$(grep '/api/v1/tasks?' "$MOCK_DIR/curl_argv.log")"; then
+        pass "Task listing disables pagination"
+    else
+        fail "Task listing must send x-disable-pagination: True"
+    fi
+
+    unset MOCK_USERSTORY_HTTP_CODE
+}
+
 echo ""
 echo "=== taiga-update-on-merge.sh tests ==="
 echo ""
@@ -903,6 +993,9 @@ test_issue_rejected_status_skips
 test_story_missing_status_extra_info_skips
 test_story_missing_status_extra_info_no_signal_comments
 test_issue_missing_status_extra_info_skips
+test_story_lookup_server_error_fails
+test_issue_lookup_server_error_fails
+test_credentials_and_bodies_not_in_argv
 
 echo ""
 if [ "$FAILURES" -gt 0 ]; then

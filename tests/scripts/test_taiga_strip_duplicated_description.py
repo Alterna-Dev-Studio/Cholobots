@@ -927,3 +927,90 @@ class TestProcessRecleanItems:
         assert records[0]["decision"] == "skipped-version-conflict"
         assert client.patches == []
         assert records[0]["new_length"] == records[0]["old_length"]
+
+
+class RecordingCurl:
+    """Stand-in for subprocess.run that records argv and stdin and replays canned replies."""
+
+    def __init__(self, replies):
+        self.replies = list(replies)
+        self.calls = []
+
+    def __call__(self, cmd, **kwargs):
+        self.calls.append((cmd, kwargs.get("input")))
+        return self.replies.pop(0)
+
+
+def _client_with(monkeypatch, replies):
+    curl = RecordingCurl([FakeCompletedProcess(0, stdout='{"auth_token": "tok.en"}')] + replies)
+    monkeypatch.setattr(taiga_strip_duplicated_description.subprocess, "run", curl)
+    monkeypatch.setattr(taiga_strip_duplicated_description.time, "sleep", lambda _: None)
+    client = taiga_strip_duplicated_description.TaigaClient("https://taiga.example", "user", "s3cret")
+    return client, curl
+
+
+class TestSecretsStayOutOfArgv:
+    def test_login_password_travels_on_stdin(self, monkeypatch):
+        _, curl = _client_with(monkeypatch, [])
+
+        cmd, stdin = curl.calls[0]
+        assert "s3cret" not in " ".join(cmd)
+        assert "s3cret" in stdin
+
+    def test_bearer_token_travels_on_stdin_for_reads_and_patches(self, monkeypatch):
+        client, curl = _client_with(monkeypatch, [
+            FakeCompletedProcess(0, stdout='{"id": 1}'),
+            FakeCompletedProcess(0, stdout='{"id": 1}'),
+        ])
+
+        client.get_item("userstories", 1)
+        client.patch_description("userstories", 1, 'body with "quotes" \\ and\nnewline', 3)
+
+        for cmd, stdin in curl.calls[1:]:
+            assert "tok.en" not in " ".join(cmd)
+            assert "tok.en" in stdin
+        patch_cmd, patch_stdin = curl.calls[2]
+        assert "quotes" not in " ".join(patch_cmd), "the description must not be in argv"
+        assert patch_stdin.startswith('header = "Authorization: Bearer tok.en"\n')
+        assert patch_stdin.count("\n") == 2, "the body must stay on one config line"
+
+
+class TestListAllPaging:
+    @staticmethod
+    def _page(rows, status=200):
+        return FakeCompletedProcess(0, stdout=json.dumps(rows) + f"\n{status}")
+
+    def test_short_pages_do_not_end_the_scan(self, monkeypatch):
+        """Taiga may serve 30 rows when 100 were asked for; keep paging."""
+        client, curl = _client_with(monkeypatch, [
+            self._page([{"id": n} for n in range(30)]),
+            self._page([{"id": n} for n in range(30, 45)]),
+            FakeCompletedProcess(0, stdout='{"_error_message": "Not found."}\n404'),
+        ])
+
+        items = client.list_all("/api/v1/userstories", project=39)
+
+        assert [item["id"] for item in items] == list(range(45))
+        assert len(curl.calls) == 4  # auth + 3 pages
+
+    def test_an_empty_page_ends_the_scan(self, monkeypatch):
+        client, _ = _client_with(monkeypatch, [self._page([{"id": 1}]), self._page([])])
+
+        assert client.list_all("/api/v1/issues") == [{"id": 1}]
+
+    def test_a_404_on_the_first_page_is_an_error(self, monkeypatch):
+        client, _ = _client_with(monkeypatch, [
+            FakeCompletedProcess(0, stdout='{"_error_message": "Not found."}\n404'),
+        ])
+
+        with pytest.raises(TaigaStripError):
+            client.list_all("/api/v1/nope")
+
+    def test_a_mid_scan_server_error_is_not_end_of_data(self, monkeypatch):
+        client, _ = _client_with(monkeypatch, [
+            self._page([{"id": 1}]),
+            FakeCompletedProcess(0, stdout="boom\n500"),
+        ])
+
+        with pytest.raises(TaigaStripError):
+            client.list_all("/api/v1/issues")

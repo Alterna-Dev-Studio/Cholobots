@@ -97,14 +97,29 @@ def redact_cmd(cmd: List[str]) -> str:
     return " ".join(redacted)
 
 
-def run_request(cmd: List[str]) -> Tuple[int, str]:
+def _quote_config_value(value: str) -> str:
+    """Quote a value for a curl config file (backslash and double quote are escaped)."""
+    escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{escaped}"'
+
+
+def bearer_config(token: str) -> str:
+    """A curl config (read from stdin with ``-K -``) carrying the bearer header.
+
+    Keeps the token out of curl's argv, which any local user can read from
+    /proc/<pid>/cmdline.
+    """
+    return f"header = {_quote_config_value(f'Authorization: Bearer {token}')}\n"
+
+
+def run_request(cmd: List[str], stdin_text: Optional[str] = None) -> Tuple[int, str]:
     """Run a curl command that appends its HTTP status, returning (status, body).
 
     The status is carried out rather than turned into a curl failure because the
     paging loop has to tell a 404 (past the last page — expected) from any other
     error (not expected).
     """
-    result = subprocess.run(cmd, check=False, capture_output=True, text=True)
+    result = subprocess.run(cmd, input=stdin_text, check=False, capture_output=True, text=True)
 
     if result.returncode != 0:
         raise TaigaDuplicateTasksError(
@@ -121,8 +136,8 @@ def run_request(cmd: List[str]) -> Tuple[int, str]:
         ) from exc
 
 
-def run_json_request(cmd: List[str]) -> object:
-    status, body = run_request(cmd)
+def run_json_request(cmd: List[str], stdin_text: Optional[str] = None) -> object:
+    status, body = run_request(cmd, stdin_text)
 
     if status >= 400:
         raise TaigaDuplicateTasksError(f"Request failed (HTTP {status}): {redact_cmd(cmd)}")
@@ -156,17 +171,21 @@ class TaigaClient:
 
     def _authenticate(self, username: str, password: str) -> str:
         payload = {"type": "normal", "username": username, "password": password}
-        response = run_json_request([
-            "curl",
-            *CURL_STATUS_ARGS,
-            "-H",
-            "Content-Type: application/json",
-            "-X",
-            "POST",
-            "-d",
-            json.dumps(payload),
-            f"{self.base_url}/api/v1/auth",
-        ])
+        # The body travels on stdin so the password never appears in curl's argv.
+        response = run_json_request(
+            [
+                "curl",
+                *CURL_STATUS_ARGS,
+                "-H",
+                "Content-Type: application/json",
+                "-X",
+                "POST",
+                "--data-binary",
+                "@-",
+                f"{self.base_url}/api/v1/auth",
+            ],
+            stdin_text=json.dumps(payload),
+        )
         token = (response or {}).get("auth_token")
 
         if not token:
@@ -176,13 +195,10 @@ class TaigaClient:
 
     def _get_page(self, path: str, **params: object) -> Tuple[int, str]:
         url = f"{self.base_url}{path}?{urlencode(params)}"
-        return run_request([
-            "curl",
-            *CURL_STATUS_ARGS,
-            "-H",
-            f"Authorization: Bearer {self.token}",
-            url,
-        ])
+        return run_request(
+            ["curl", *CURL_STATUS_ARGS, "-K", "-", url],
+            stdin_text=bearer_config(self.token),
+        )
 
     def list_all_tasks(self, project_id: int) -> List[dict]:
         tasks: List[dict] = []
@@ -196,7 +212,10 @@ class TaigaClient:
                 page_size=PAGE_SIZE,
             )
 
-            if status == HTTP_NOT_FOUND:
+            # 404 ends the scan only past the first page. On page 1 it means a bad
+            # project or endpoint, and treating it as "no tasks" would report a
+            # clean duplicate-task result for a scan that never read anything.
+            if status == HTTP_NOT_FOUND and page > 1:
                 break
 
             if status >= 400:
@@ -221,14 +240,8 @@ class TaigaClient:
 
     def get_task(self, task_id: int) -> Optional[dict]:
         """Fetch one task; None when it no longer exists (someone else deleted it)."""
-        cmd = [
-            "curl",
-            *CURL_STATUS_ARGS,
-            "-H",
-            f"Authorization: Bearer {self.token}",
-            f"{self.base_url}/api/v1/tasks/{task_id}",
-        ]
-        status, body = run_request(cmd)
+        cmd = ["curl", *CURL_STATUS_ARGS, "-K", "-", f"{self.base_url}/api/v1/tasks/{task_id}"]
+        status, body = run_request(cmd, stdin_text=bearer_config(self.token))
 
         if status == HTTP_NOT_FOUND:
             return None
@@ -247,15 +260,10 @@ class TaigaClient:
         return task
 
     def delete_task(self, task_id: int) -> None:
-        status, _ = run_request([
-            "curl",
-            *CURL_STATUS_ARGS,
-            "-H",
-            f"Authorization: Bearer {self.token}",
-            "-X",
-            "DELETE",
-            f"{self.base_url}/api/v1/tasks/{task_id}",
-        ])
+        status, _ = run_request(
+            ["curl", *CURL_STATUS_ARGS, "-K", "-", "-X", "DELETE", f"{self.base_url}/api/v1/tasks/{task_id}"],
+            stdin_text=bearer_config(self.token),
+        )
 
         if status >= 400:
             raise TaigaDuplicateTasksError(f"Deleting task {task_id} failed (HTTP {status})")

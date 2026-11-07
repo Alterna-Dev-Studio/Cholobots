@@ -92,6 +92,9 @@ fi
 # Repo owner and name. PRs land on the upstream repo; the exported GH_TOKEN
 # cannot see it, so every gh call drops it with `env -u GH_TOKEN`.
 GH_REPO="${GH_REPO:-MrsBohemian/Cholobots}"
+# `gh run list` returns 20 runs by default. A busy PR can have more runs for one
+# head SHA than that, and a missing failing or pending run would read as STABLE.
+RUN_LIST_LIMIT=1000
 OWNER="${GH_REPO%%/*}"
 REPO="${GH_REPO#*/}"
 
@@ -175,7 +178,7 @@ while true; do
         exit 0
     fi
 
-    runs_json=$(env -u GH_TOKEN gh run list --commit "$pr_sha" --json name,status,conclusion,createdAt --repo "$GH_REPO" 2>"$gh_stderr") || {
+    runs_json=$(env -u GH_TOKEN gh run list --commit "$pr_sha" --limit "$RUN_LIST_LIMIT" --json name,status,conclusion,createdAt --repo "$GH_REPO" 2>"$gh_stderr") || {
         # Output must stay one line for stability_parser.py; flatten any
         # embedded newlines from the captured stderr.
         echo "ERROR:gh run list failed: $(tr '\n' ' ' <"$gh_stderr")"
@@ -252,26 +255,40 @@ while true; do
     # threads opened by advisory reviewers (MONITOR_ADVISORY_REVIEWERS)
     # never gate merge, matching the required-vs-advisory check scoping above
     # (#2092/#2103). Human and other-bot threads still block.
-    threads_json=$(env -u GH_TOKEN gh api graphql -f query="
-    {
-      repository(owner: \"${OWNER}\", name: \"${REPO}\") {
-        pullRequest(number: ${PR_NUMBER}) {
-          reviewThreads(first: 100) {
+    # --paginate follows pageInfo.endCursor until hasNextPage is false and prints
+    # one JSON document per page; they are merged below. A single page would
+    # check only the first 100 threads and miss an unresolved one beyond them.
+    threads_raw=$(env -u GH_TOKEN gh api graphql --paginate \
+        -f owner="$OWNER" -f name="$REPO" -F number="$PR_NUMBER" \
+        -f query='
+    query($owner: String!, $name: String!, $number: Int!, $endCursor: String) {
+      repository(owner: $owner, name: $name) {
+        pullRequest(number: $number) {
+          reviewThreads(first: 100, after: $endCursor) {
             nodes {
               id
               isResolved
               comments(first: 1) { nodes { author { login } } }
             }
+            pageInfo { hasNextPage endCursor }
           }
         }
       }
-    }" 2>"$gh_stderr") || {
+    }' 2>"$gh_stderr") || {
         echo "ERROR:GraphQL query failed: $(tr '\n' ' ' <"$gh_stderr")"
         exit 1
     }
 
-    if ! echo "$threads_json" | jq -e '.data.repository.pullRequest.reviewThreads.nodes | type == "array"' >/dev/null 2>&1; then
-        echo "ERROR:GraphQL query returned unparseable JSON: ${threads_json}"
+    # Merge the pages into one document. Any page without a nodes array (an
+    # error payload) or an empty response fails loudly instead of reading as
+    # "no unresolved threads".
+    if ! threads_json=$(jq -sc '
+        if length == 0 then error("no pages") else . end
+        | {data: {repository: {pullRequest: {reviewThreads: {nodes: [
+            .[] | .data.repository.pullRequest.reviewThreads.nodes
+            | if type == "array" then .[] else error("page without nodes") end
+          ]}}}}}' <<<"$threads_raw" 2>/dev/null); then
+        echo "ERROR:GraphQL query returned unparseable JSON: $(tr '\n' ' ' <<<"$threads_raw")"
         exit 1
     fi
 

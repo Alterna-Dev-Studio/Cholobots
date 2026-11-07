@@ -37,6 +37,9 @@ URL=""
 OUTPUT_FILE=""
 WRITE_OUT=""
 
+# Record argv so tests can assert what was (not) put on the command line.
+if [ -n "${MOCK_ARGV_LOG:-}" ]; then echo "$*" >> "$MOCK_ARGV_LOG"; fi
+
 args=("$@")
 i=0
 while [ $i -lt ${#args[@]} ]; do
@@ -53,6 +56,12 @@ done
 case "$URL" in
     */api/v1/auth)
         echo '{"auth_token":"mock-token-123"}'
+        ;;
+    */api/v1/tasks\?*)
+        # 31 tasks: more than one default Taiga page (30) would hold.
+        RESPONSE=$(python3 -c "import json; print(json.dumps([{'id': n, 'ref': n, 'subject': 't', 'status': 1, 'status_extra_info': {}, 'is_closed': False} for n in range(1, 32)]))")
+        if [ -n "$OUTPUT_FILE" ]; then echo "$RESPONSE" > "$OUTPUT_FILE"; else echo "$RESPONSE"; fi
+        if [ "$WRITE_OUT" = "%{http_code}" ]; then echo "200"; fi
         ;;
     */api/v1/userstories/by_ref*|*/api/v1/issues/by_ref*)
         HTTP_CODE="${MOCK_HTTP_CODE:-200}"
@@ -211,6 +220,52 @@ test_success_exits_0() {
     unset MOCK_HTTP_CODE
 }
 
+# ============================================================
+# Test: credentials stay off argv, tasks are unpaginated, no fixed /tmp files
+# ============================================================
+test_secrets_off_argv_and_tasks_unpaginated() {
+    info "Test: no credentials in argv, full task list requested, no fixed /tmp paths"
+    setup_mock_curl
+    export MOCK_HTTP_CODE=200
+    export MOCK_ARGV_LOG="$MOCK_DIR/argv.log"
+    rm -f /tmp/taiga_item_response.json /tmp/taiga_tasks_response.json /tmp/taiga_tasks_compact.json
+
+    local output rc=0
+    output=$(run_script 9999 39 --with-tasks 2>&1) && rc=0 || rc=$?
+
+    if [ "$rc" -eq 0 ]; then
+        pass "--with-tasks exits 0"
+    else
+        fail "Expected exit 0, got $rc. Output: $output"
+    fi
+
+    if grep -q "testpass\|mock-token-123" "$MOCK_ARGV_LOG"; then
+        fail "Password or bearer token appeared on a curl command line"
+    else
+        pass "Password and bearer token are not in curl argv"
+    fi
+
+    if grep "api/v1/tasks" "$MOCK_ARGV_LOG" | grep -q "x-disable-pagination: True"; then
+        pass "Task listing sends x-disable-pagination: True"
+    else
+        fail "Task listing must disable pagination"
+    fi
+
+    if [ "$(python3 -c 'import json,sys; print(len(json.load(sys.stdin)["tasks"]))' <<< "$output")" -eq 31 ]; then
+        pass "All 31 tasks are in the output"
+    else
+        fail "Expected 31 tasks in output"
+    fi
+
+    if ls /tmp/taiga_item_response.json /tmp/taiga_tasks_response.json /tmp/taiga_tasks_compact.json >/dev/null 2>&1; then
+        fail "Script wrote predictable files under /tmp"
+    else
+        pass "No predictable /tmp files are written"
+    fi
+
+    unset MOCK_HTTP_CODE MOCK_ARGV_LOG
+}
+
 echo ""
 echo "=== taiga-story.sh 404 exit-code tests ==="
 echo ""
@@ -220,6 +275,7 @@ test_default_project_is_39
 test_issue_404_exits_44
 test_non_404_error_exits_1
 test_success_exits_0
+test_secrets_off_argv_and_tasks_unpaginated
 
 echo ""
 if [ "$FAILURES" -gt 0 ]; then

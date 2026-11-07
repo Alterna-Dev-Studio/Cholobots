@@ -57,7 +57,7 @@ jobs:
         HTTP_CODE=$(curl -sS -o /dev/null -w "%{http_code}" \
           -X POST "${TAIGA_API_URL}/api/v1/auth" \
           -H "Content-Type: application/json" \
-          -d "$AUTH_PAYLOAD" 2>"$CURL_STDERR")
+          -d @- <<<"$AUTH_PAYLOAD" 2>"$CURL_STDERR")
         CURL_EXIT_CODE=$?
         set -e
         if [ "$CURL_EXIT_CODE" -ne 0 ]; then

@@ -194,8 +194,32 @@ def redact_cmd(cmd: List[str]) -> str:
     return " ".join(redacted)
 
 
-def run_json_command(cmd: List[str], attempts: int = REQUEST_ATTEMPTS) -> object:
-    """Run a curl command and parse its JSON, retrying transport failures.
+def _quote_config_value(value: str) -> str:
+    """Quote a value for a curl config file (backslash and double quote are escaped)."""
+    escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{escaped}"'
+
+
+def bearer_config(token: str, body: Optional[str] = None) -> str:
+    """A curl config (read from stdin with ``-K -``) carrying the bearer header and optional body.
+
+    Putting the token and the request body in a config on stdin keeps both out
+    of curl's argv, which any local user can read from /proc/<pid>/cmdline.
+    """
+    config = f"header = {_quote_config_value(f'Authorization: Bearer {token}')}\n"
+
+    if body is not None:
+        config += f"data-binary = {_quote_config_value(body)}\n"
+
+    return config
+
+
+def _run_curl(
+    cmd: List[str],
+    attempts: int = REQUEST_ATTEMPTS,
+    stdin_text: Optional[str] = None,
+) -> "subprocess.CompletedProcess[str]":
+    """Run a curl command, retrying transport failures; return the successful process.
 
     A full cleanup run makes two requests per item across hundreds of items, and
     the occasional connection is refused. Retrying with a backoff keeps a whole
@@ -203,12 +227,15 @@ def run_json_command(cmd: List[str], attempts: int = REQUEST_ATTEMPTS) -> object
     across every attempt is still an error. A deterministic HTTP error (curl
     exit code 22, from "-f") is not retried — the server already answered, and
     retrying would just add backoff delay before failing anyway.
+
+    ``stdin_text`` carries anything sensitive (the login body, the bearer
+    header) so it never appears in the command line.
     """
     for attempt in range(1, attempts + 1):
-        result = subprocess.run(cmd, check=False, capture_output=True, text=True)
+        result = subprocess.run(cmd, input=stdin_text, check=False, capture_output=True, text=True)
 
         if result.returncode == 0:
-            break
+            return result
 
         if result.returncode == CURL_HTTP_ERROR_EXIT_CODE or attempt == attempts:
             raise TaigaStripError(
@@ -218,11 +245,44 @@ def run_json_command(cmd: List[str], attempts: int = REQUEST_ATTEMPTS) -> object
 
         time.sleep(RETRY_BACKOFF_SECONDS * attempt)
 
+    raise TaigaStripError(f"Command was never attempted: {redact_cmd(cmd)}")
+
+
+def run_json_command(
+    cmd: List[str],
+    attempts: int = REQUEST_ATTEMPTS,
+    stdin_text: Optional[str] = None,
+) -> object:
+    """Run a curl command and parse its JSON, retrying transport failures."""
+    result = _run_curl(cmd, attempts, stdin_text)
+
     try:
         return json.loads(result.stdout)
     except json.JSONDecodeError as exc:
         raise TaigaStripError(
             f"Command produced invalid JSON: {redact_cmd(cmd)}",
+        ) from exc
+
+
+def run_status_command(
+    cmd: List[str],
+    attempts: int = REQUEST_ATTEMPTS,
+    stdin_text: Optional[str] = None,
+) -> Tuple[int, str]:
+    """Run a curl command that appends its HTTP status line; return (status, body).
+
+    The command omits ``-f`` so an HTTP error comes back as a status rather than
+    a curl failure; the paging loop needs that to tell the 404 Taiga answers
+    past the last page from any other error.
+    """
+    result = _run_curl(cmd, attempts, stdin_text)
+    body, _, status_text = result.stdout.rpartition("\n")
+
+    try:
+        return int(status_text.strip()), body
+    except ValueError as exc:
+        raise TaigaStripError(
+            f"Command did not report an HTTP status: {redact_cmd(cmd)}",
         ) from exc
 
 
@@ -246,17 +306,21 @@ class TaigaClient:
             "username": username,
             "password": password,
         }
-        response = run_json_command([
-            "curl",
-            "-sf",
-            "-H",
-            "Content-Type: application/json",
-            "-X",
-            "POST",
-            "-d",
-            json.dumps(payload),
-            f"{self.base_url}/api/v1/auth",
-        ])
+        # The body travels on stdin so the password never appears in curl's argv.
+        response = run_json_command(
+            [
+                "curl",
+                "-sf",
+                "-H",
+                "Content-Type: application/json",
+                "-X",
+                "POST",
+                "--data-binary",
+                "@-",
+                f"{self.base_url}/api/v1/auth",
+            ],
+            stdin_text=json.dumps(payload),
+        )
         token = response.get("auth_token")
 
         if not token:
@@ -264,26 +328,52 @@ class TaigaClient:
 
         return token
 
-    def get(self, path: str, **params: object) -> object:
+    def _url(self, path: str, params: Dict[str, object]) -> str:
         url = f"{self.base_url}{path}"
 
         if params:
             url = f"{url}?{urlencode(params)}"
 
-        return run_json_command([
-            "curl",
-            "-sf",
-            "-H",
-            f"Authorization: Bearer {self.token}",
-            url,
-        ])
+        return url
+
+    def get(self, path: str, **params: object) -> object:
+        # The bearer token goes in a curl config on stdin, keeping it out of argv.
+        return run_json_command(
+            ["curl", "-sf", "-K", "-", self._url(path, params)],
+            stdin_text=bearer_config(self.token),
+        )
 
     def list_all(self, path: str, **params: object) -> List[dict]:
         items: List[dict] = []
         page = 1
 
+        # Taiga may cap page_size below the requested value (30 rows is common), so a
+        # short page is not the last page. Page until an empty page, or the 404 Taiga
+        # answers past the end; a 404 on page 1 is a bad path, not an empty collection.
         while True:
-            batch = self.get(path, page=page, page_size=100, **params)
+            status, body = run_status_command(
+                [
+                    "curl",
+                    "-s",
+                    "-w",
+                    "\n%{http_code}",
+                    "-K",
+                    "-",
+                    self._url(path, {"page": page, "page_size": 100, **params}),
+                ],
+                stdin_text=bearer_config(self.token),
+            )
+
+            if status == 404 and page > 1:
+                break
+
+            if status >= 400:
+                raise TaigaStripError(f"Listing {path} failed (HTTP {status}) on page {page}")
+
+            try:
+                batch = json.loads(body)
+            except json.JSONDecodeError as exc:
+                raise TaigaStripError(f"Invalid JSON listing {path} on page {page}") from exc
 
             if not isinstance(batch, list):
                 raise TaigaStripError(f"Expected list response for {path}")
@@ -292,10 +382,6 @@ class TaigaClient:
                 break
 
             items.extend(batch)
-
-            if len(batch) < 100:
-                break
-
             page += 1
 
         return items
@@ -319,19 +405,21 @@ class TaigaClient:
     def patch_description(self, kind: str, item_id: int, description: str, version: int) -> None:
         """PATCH the description, passing the version Taiga requires for optimistic concurrency."""
         payload = {"description": description, "version": version}
-        run_json_command([
-            "curl",
-            "-sf",
-            "-H",
-            f"Authorization: Bearer {self.token}",
-            "-H",
-            "Content-Type: application/json",
-            "-X",
-            "PATCH",
-            "-d",
-            json.dumps(payload),
-            f"{self.base_url}/api/v1/{kind}/{item_id}",
-        ])
+        # Token and body (the item's description) go in a curl config on stdin.
+        run_json_command(
+            [
+                "curl",
+                "-sf",
+                "-K",
+                "-",
+                "-H",
+                "Content-Type: application/json",
+                "-X",
+                "PATCH",
+                f"{self.base_url}/api/v1/{kind}/{item_id}",
+            ],
+            stdin_text=bearer_config(self.token, json.dumps(payload)),
+        )
 
 
 def normalise_for_comparison(text: Optional[str]) -> str:

@@ -65,6 +65,11 @@ log() { echo "[taiga-sync] $*"; }
 warn() { echo "[taiga-sync] WARNING: $*" >&2; }
 err() { echo "[taiga-sync] ERROR: $*" >&2; }
 
+# Credentials and request bodies never go on a command line (readable via
+# /proc/<pid>/cmdline): bodies are sent on stdin and the bearer header is read
+# by curl from a process substitution.
+auth_header() { printf 'Authorization: Bearer %s\n' "$TOKEN"; }
+
 # Authenticate with Taiga API
 log "Authenticating with Taiga..."
 AUTH_PAYLOAD=$(TAIGA_USERNAME="$TAIGA_USERNAME" TAIGA_PASSWORD="$TAIGA_PASSWORD" python3 -c 'import json, os; print(json.dumps({"type": "normal", "username": os.environ["TAIGA_USERNAME"], "password": os.environ["TAIGA_PASSWORD"]}))')
@@ -72,7 +77,7 @@ set +e
 HTTP_CODE=$(curl -sS -o "$TMPDIR_SCRIPT/auth.json" -w "%{http_code}" \
     -X POST "${TAIGA_API_URL}/api/v1/auth" \
     -H "Content-Type: application/json" \
-    -d "$AUTH_PAYLOAD")
+    -d @- <<<"$AUTH_PAYLOAD")
 CURL_EXIT=$?
 set -e
 
@@ -87,7 +92,7 @@ if [[ "$HTTP_CODE" != "200" ]]; then
     exit 1
 fi
 
-TOKEN=$(python3 -c "import json; print(json.load(open('$TMPDIR_SCRIPT/auth.json'))['auth_token'])")
+TOKEN=$(python3 -c "import json, sys; print(json.load(open(sys.argv[1]))['auth_token'])" "$TMPDIR_SCRIPT/auth.json")
 log "Authenticated successfully"
 
 # Try to find the item: user story first, then issue
@@ -101,7 +106,7 @@ ITEM_JSON=""
 # Try user story
 HTTP_CODE=$(curl -s -o "$TMPDIR_SCRIPT/userstory.json" -w "%{http_code}" \
     "${TAIGA_API_URL}/api/v1/userstories/by_ref?project=${PROJECT_ID}&ref=${REF}" \
-    -H "Authorization: Bearer $TOKEN")
+    -H @<(auth_header))
 
 if [[ "$HTTP_CODE" -eq 200 ]]; then
     ITEM_TYPE="userstories"
@@ -115,10 +120,19 @@ if [[ "$HTTP_CODE" -eq 200 ]]; then
     ITEM_STATUS_IS_CLOSED=$(python3 -c "import json; print((json.load(open('$TMPDIR_SCRIPT/userstory.json')).get('status_extra_info') or {}).get('is_closed', 'unknown'))")
     log "Found user story #${REF} (id=${ITEM_ID}, status=${ITEM_STATUS})"
 else
+    # Only a 404 means "not a user story, try the issue endpoint". Any other
+    # status (500, 401, ...) says nothing about the ref, and falling through
+    # would let a later issue-404 end the run as a successful no-op.
+    if [[ "$HTTP_CODE" -ne 404 ]]; then
+        err "User story lookup for #${REF} failed: HTTP $HTTP_CODE"
+        cat "$TMPDIR_SCRIPT/userstory.json" >&2
+        exit 1
+    fi
+
     # Try issue
     HTTP_CODE=$(curl -s -o "$TMPDIR_SCRIPT/issue.json" -w "%{http_code}" \
         "${TAIGA_API_URL}/api/v1/issues/by_ref?project=${PROJECT_ID}&ref=${REF}" \
-        -H "Authorization: Bearer $TOKEN")
+        -H @<(auth_header))
 
     if [[ "$HTTP_CODE" -eq 200 ]]; then
         ITEM_TYPE="issues"
@@ -128,9 +142,13 @@ else
         ITEM_VERSION=$(python3 -c "import json; print(json.load(open('$TMPDIR_SCRIPT/issue.json'))['version'])")
         ITEM_STATUS_IS_CLOSED=$(python3 -c "import json; print((json.load(open('$TMPDIR_SCRIPT/issue.json')).get('status_extra_info') or {}).get('is_closed', 'unknown'))")
         log "Found issue #${REF} (id=${ITEM_ID}, status=${ITEM_STATUS})"
-    else
+    elif [[ "$HTTP_CODE" -eq 404 ]]; then
         warn "No user story or issue found with ref #${REF} in project ${PROJECT_ID}"
         exit 0
+    else
+        err "Issue lookup for #${REF} failed: HTTP $HTTP_CODE"
+        cat "$TMPDIR_SCRIPT/issue.json" >&2
+        exit 1
     fi
 fi
 
@@ -183,9 +201,9 @@ patch_item() {
     local payload="$1"
     HTTP_CODE=$(curl -s -o "$TMPDIR_SCRIPT/patch_response.json" -w "%{http_code}" \
         -X PATCH "${TAIGA_API_URL}/api/v1/${ITEM_TYPE}/${ITEM_ID}" \
-        -H "Authorization: Bearer $TOKEN" \
+        -H @<(auth_header) \
         -H "Content-Type: application/json" \
-        -d "$payload")
+        -d @- <<<"$payload")
 
     if [[ "$HTTP_CODE" -ne 200 ]]; then
         err "Failed to update ${ITEM_TYPE} #${REF}: HTTP $HTTP_CODE"
@@ -238,18 +256,26 @@ fi
 if [[ "$ITEM_TYPE" == "userstories" ]]; then
     log "Checking for open tasks on story #${REF}..."
 
-    curl -s -o "$TMPDIR_SCRIPT/tasks.json" \
+    # Taiga caps a list response at 30 rows unless pagination is disabled; a
+    # story with more tasks would otherwise leave the later ones open.
+    HTTP_CODE=$(curl -s -o "$TMPDIR_SCRIPT/tasks.json" -w "%{http_code}" \
         "${TAIGA_API_URL}/api/v1/tasks?project=${PROJECT_ID}&user_story=${ITEM_ID}" \
-        -H "Authorization: Bearer $TOKEN"
+        -H @<(auth_header) \
+        -H "x-disable-pagination: True")
+    if [[ "$HTTP_CODE" -ne 200 ]]; then
+        err "Failed to list tasks for story #${REF}: HTTP $HTTP_CODE"
+        cat "$TMPDIR_SCRIPT/tasks.json" >&2
+        exit 1
+    fi
 
     # Filter to open tasks and close each one
     OPEN_TASKS=$(python3 -c "
-import json
-tasks = json.load(open('$TMPDIR_SCRIPT/tasks.json'))
+import json, sys
+tasks = json.load(open(sys.argv[1]))
 open_tasks = [t for t in tasks if not t.get('is_closed', False)]
 for t in open_tasks:
     print(f\"{t['id']}:{t['version']}:{t.get('ref', '?')}\")
-")
+" "$TMPDIR_SCRIPT/tasks.json")
 
     if [[ -z "$OPEN_TASKS" ]]; then
         log "No open tasks to close"
@@ -272,9 +298,9 @@ print(json.dumps({'status': int(sys.argv[1]), 'version': int(sys.argv[2])}))
 
                 HTTP_CODE=$(curl -s -o "$TMPDIR_SCRIPT/task_patch.json" -w "%{http_code}" \
                     -X PATCH "${TAIGA_API_URL}/api/v1/tasks/${TASK_ID}" \
-                    -H "Authorization: Bearer $TOKEN" \
+                    -H @<(auth_header) \
                     -H "Content-Type: application/json" \
-                    -d "$TASK_JSON")
+                    -d @- <<<"$TASK_JSON")
 
                 if [[ "$HTTP_CODE" -ne 200 ]]; then
                     warn "Failed to close task #${TASK_REF} (id=${TASK_ID}): HTTP $HTTP_CODE"

@@ -399,7 +399,7 @@ class TestListAllTasks:
         monkeypatch.setattr(
             taiga_find_duplicate_tasks,
             "run_request",
-            lambda cmd: responses.pop(0),
+            lambda cmd, stdin_text=None: responses.pop(0),
         )
         monkeypatch.setattr(taiga_find_duplicate_tasks, "PAGE_SIZE", 2)
         client = TaigaClient(base_url="https://taiga.example", username="u", password="p")
@@ -420,7 +420,7 @@ class TestListAllTasks:
         monkeypatch.setattr(
             taiga_find_duplicate_tasks,
             "run_request",
-            lambda cmd: responses.pop(0),
+            lambda cmd, stdin_text=None: responses.pop(0),
         )
         client = TaigaClient(base_url="https://taiga.example", username="u", password="p")
 
@@ -435,7 +435,7 @@ class TestListAllTasks:
         monkeypatch.setattr(
             taiga_find_duplicate_tasks,
             "run_request",
-            lambda cmd: responses.pop(0),
+            lambda cmd, stdin_text=None: responses.pop(0),
         )
         client = TaigaClient(base_url="https://taiga.example", username="u", password="p")
 
@@ -498,3 +498,43 @@ class TestReport:
         assert paths["report_json"].exists()
         assert paths["report_md"].exists()
         assert "dry-run" in paths["report_json"].name
+
+
+class TestFirstPage404IsAnError:
+    def test_404_on_page_one_raises_instead_of_reporting_no_tasks(self, monkeypatch):
+        responses = [
+            (200, '{"auth_token": "token"}'),
+            (404, '{"_error_message": "Not found."}'),
+        ]
+        monkeypatch.setattr(
+            taiga_find_duplicate_tasks,
+            "run_request",
+            lambda cmd, stdin_text=None: responses.pop(0),
+        )
+        client = TaigaClient(base_url="https://taiga.example", username="u", password="p")
+
+        with pytest.raises(TaigaDuplicateTasksError, match="404"):
+            client.list_all_tasks(99999)
+
+
+class TestSecretsStayOutOfArgv:
+    def test_password_and_token_travel_on_stdin(self, monkeypatch):
+        calls = []
+        replies = [
+            FakeCompletedProcess(0, '{"auth_token": "tok.en"}\n200'),
+            FakeCompletedProcess(0, '[]\n200'),
+        ]
+
+        def fake_run(cmd, **kwargs):
+            calls.append((cmd, kwargs.get("input")))
+            return replies.pop(0)
+
+        monkeypatch.setattr(taiga_find_duplicate_tasks.subprocess, "run", fake_run)
+        client = TaigaClient(base_url="https://taiga.example", username="u", password="s3cret")
+        client.list_all_tasks(3)
+
+        for cmd, _ in calls:
+            joined = " ".join(cmd)
+            assert "s3cret" not in joined and "tok.en" not in joined
+        assert "s3cret" in calls[0][1]
+        assert "tok.en" in calls[1][1]
