@@ -21,7 +21,7 @@ Autonomously analyze all stories in a Taiga epic (project 39, `cholo-bots`): par
 
 ## Step 0: Preflight and parse arguments
 
-Run `python3 scripts/taiga_project_setup.py --check` once. Exit 0: proceed. Exit 2: stop and print `Run: python3 scripts/taiga_project_setup.py --env-file scripts/taiga-auth.env --apply` for Jon (the project is missing statuses, the `Urgent` priority or pipeline tags this skill relies on).
+Run `python3 scripts/taiga_project_setup.py --check` once. Exit 0: proceed. Exit 2: stop and print `Run: (eval "$(~/work/utils/jon-dev-env/scripts/envtool export project/growthgarage-admin)" && python3 scripts/taiga_project_setup.py --apply)` for Jon (the project is missing statuses, the `Urgent` priority or pipeline tags this skill relies on).
 
 Split `$ARGUMENTS` into two parts:
 

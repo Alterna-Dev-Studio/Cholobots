@@ -7,5 +7,4 @@ __pycache__/
 .envrc
 .envrc.local
 .claude/worktrees/
-scripts/taiga-auth.env
 output/

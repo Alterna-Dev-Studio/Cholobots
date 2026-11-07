@@ -1,5 +1,5 @@
 # ABOUTME: Pytest tests for scripts/taiga_project_setup.py against an in-memory fake Taiga transport.
-# ABOUTME: Covers dry run (no writes), apply (only missing items), order renumbering, --check exit codes and credential precedence.
+# ABOUTME: Covers dry run (no writes), apply (only missing items), order renumbering, --check exit codes and shell-env credentials.
 import io
 import json
 import os
@@ -95,17 +95,10 @@ class FakeTaiga:
         return 404, {"detail": "not found"}
 
 
-def run(argv, fake, environ=None, is_tty=False, prompt=None, secret_prompt=None):
+def run(argv, fake, environ=None):
     out, err = io.StringIO(), io.StringIO()
     with redirect_stdout(out), redirect_stderr(err):
-        code = setup.main(
-            argv,
-            transport=fake,
-            environ=CREDS if environ is None else environ,
-            is_tty=is_tty,
-            prompt=prompt or (lambda _: pytest.fail("unexpected prompt")),
-            secret_prompt=secret_prompt or (lambda _: pytest.fail("unexpected password prompt")),
-        )
+        code = setup.main(argv, transport=fake, environ=CREDS if environ is None else environ)
     return code, out.getvalue(), err.getvalue()
 
 
@@ -208,7 +201,8 @@ class TestCheck:
         assert "story status order" not in out
         assert "tag 'triaged'" in out and "tag 'ci'" not in out
         assert "wiki page 'cross-project-execution-order'" in out
-        assert "--env-file scripts/taiga-auth.env --apply" in out
+        assert f"Run: {setup.APPLY_COMMAND}" in out
+        assert "envtool export project/growthgarage-admin" in setup.APPLY_COMMAND
 
     def test_check_exits_0_when_complete(self):
         fake = FakeTaiga()
@@ -246,46 +240,27 @@ class TestCheck:
 
 
 class TestCredentials:
-    def test_env_file_wins_over_shell_env(self, tmp_path):
-        env_file = tmp_path / "taiga-auth.env"
-        env_file.write_text(
-            "# comment\nTAIGA_API_URL=https://taiga.stub.test\nexport TAIGA_USERNAME=file-user\nTAIGA_PASSWORD='file-pass'\n"
-        )
+    def test_credentials_come_from_the_shell_env(self):
         fake = FakeTaiga()
-        code, _, _ = run(["--check", "--env-file", str(env_file)], fake)
+        code, _, _ = run(["--check"], fake)
         assert code == 2
-        assert fake.auth_bodies[0]["username"] == "file-user"
-        assert fake.auth_bodies[0]["password"] == "file-pass"
+        assert fake.auth_bodies[0] == {"type": "normal", "username": "env-user", "password": "env-pass"}
+        assert fake.calls[0][1] == "/api/v1/auth"
 
-    def test_shell_env_fills_keys_missing_from_env_file(self, tmp_path):
-        env_file = tmp_path / "taiga-auth.env"
-        env_file.write_text("TAIGA_USERNAME=file-user\nTAIGA_PASSWORD=\n")
-        fake = FakeTaiga()
-        run(["--check", "--env-file", str(env_file)], fake)
-        assert fake.auth_bodies[0] == {"type": "normal", "username": "file-user", "password": "env-pass"}
+    def test_dry_run_names_the_account_in_use(self):
+        _, out, _ = run([], FakeTaiga())
+        assert "(dry run) as env-user" in out
 
-    def test_prompts_only_when_a_tty_is_attached(self):
+    @pytest.mark.parametrize("key", setup.ENV_KEYS)
+    def test_missing_or_blank_key_exits_1_before_any_request(self, key):
         fake = FakeTaiga()
-        asked = []
-        code, _, _ = run(
-            ["--check"], fake,
-            environ={"TAIGA_API_URL": BASE},
-            is_tty=True,
-            prompt=lambda label: asked.append(label) or "tty-user",
-            secret_prompt=lambda label: asked.append(label) or "tty-pass",
-        )
-        assert code == 2
-        assert asked == ["TAIGA_USERNAME: ", "TAIGA_PASSWORD: "]
-        assert fake.auth_bodies[0]["password"] == "tty-pass"
-
-    def test_no_tty_and_no_credentials_exits_1_without_prompting(self):
-        fake = FakeTaiga()
-        code, _, err = run(["--check"], fake, environ={}, is_tty=False)
+        environ = dict(CREDS, **{key: "  "})
+        code, _, err = run(["--check"], fake, environ=environ)
         assert code == 1
-        assert "TAIGA_API_URL is not set" in err
+        assert f"{key} is not set" in err
         assert fake.calls == []
-
-    def test_example_env_file_parses(self):
-        values = setup.read_env_file(os.path.join(REPO_ROOT, "scripts", "taiga-auth.env.example"))
-        assert values["TAIGA_API_URL"] == "https://backlog.growthgarage.org"
-        assert values["TAIGA_PASSWORD"] == ""
+        del environ[key]
+        code, _, err = run(["--check"], fake, environ=environ)
+        assert code == 1
+        assert f"{key} is not set" in err
+        assert fake.calls == []

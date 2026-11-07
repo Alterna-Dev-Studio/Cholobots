@@ -4,17 +4,17 @@
 """Taiga project setup for the Cholobots pipeline.
 
 Usage:
-  python3 scripts/taiga_project_setup.py [--project 39] [--env-file PATH] [--check | --apply]
+  python3 scripts/taiga_project_setup.py [--project 39] [--check | --apply]
 
 Modes:
   (default)  Dry run: print the before/after table and the writes --apply would make.
   --apply    Make those writes. Needs a Taiga project admin account.
   --check    Print what is missing; exit 0 when complete, 2 when anything is missing.
 
-Credentials, per key, first found wins:
-  1. --env-file PATH  (KEY=VALUE lines: TAIGA_API_URL, TAIGA_USERNAME, TAIGA_PASSWORD)
-  2. the shell environment
-  3. an interactive prompt (getpass for the password), only when stdin is a TTY
+Credentials come from the shell environment only: TAIGA_API_URL, TAIGA_USERNAME
+and TAIGA_PASSWORD. In this checkout direnv exports the agent account from the
+jon-dev-env vault, which is enough for the dry run and --check. --apply needs an
+admin, so Jon loads the admin scope into a subshell for that one command.
 
 Idempotent by case-insensitive name. It creates missing story statuses, issue
 statuses, priorities, tags and the roadmap wiki page, and PATCHes `order` so the
@@ -23,13 +23,11 @@ recolours anything, and never changes `is_closed` on an existing status.
 
 Exit codes: 0 success (or complete, for --check), 1 error, 2 incomplete (--check).
 
-Jon's one-off run:
-  cp scripts/taiga-auth.env.example scripts/taiga-auth.env && $EDITOR scripts/taiga-auth.env
-  python3 scripts/taiga_project_setup.py --env-file scripts/taiga-auth.env --apply
+Jon's one-off run, after storing the admin scope with envtool set:
+  (eval "$(~/work/utils/jon-dev-env/scripts/envtool export project/growthgarage-admin)" && python3 scripts/taiga_project_setup.py --apply)
 """
 
 import argparse
-import getpass
 import json
 import os
 import sys
@@ -43,6 +41,11 @@ EXIT_OK = 0
 EXIT_ERROR = 1
 EXIT_INCOMPLETE = 2
 ENV_KEYS = ("TAIGA_API_URL", "TAIGA_USERNAME", "TAIGA_PASSWORD")
+# Printed for Jon wherever the project is incomplete; the skills print the same line.
+APPLY_COMMAND = (
+    '(eval "$(~/work/utils/jon-dev-env/scripts/envtool export project/growthgarage-admin)"'
+    " && python3 scripts/taiga_project_setup.py --apply)"
+)
 
 
 @dataclass(frozen=True)
@@ -192,42 +195,12 @@ class TaigaApi:
 # -- credentials -------------------------------------------------------------
 
 
-def read_env_file(path: str) -> Dict[str, str]:
-    """Parse KEY=VALUE lines; blank lines, comments and an `export ` prefix are allowed."""
-    values: Dict[str, str] = {}
-    with open(path, encoding="utf-8") as handle:
-        for line in handle:
-            line = line.strip()
-            if not line or line.startswith("#") or "=" not in line:
-                continue
-            key, _, value = line.partition("=")
-            key = key.strip()
-            if key.startswith("export "):
-                key = key[len("export "):].strip()
-            value = value.strip()
-            if len(value) >= 2 and value[0] == value[-1] and value[0] in "'\"":
-                value = value[1:-1]
-            values[key] = value
-    return values
-
-
-def resolve_credentials(
-    env_file: Optional[str],
-    environ: Dict[str, str],
-    is_tty: bool,
-    prompt: Callable[[str], str] = input,
-    secret_prompt: Callable[[str], str] = getpass.getpass,
-) -> Dict[str, str]:
-    file_values = read_env_file(env_file) if env_file else {}
+def resolve_credentials(environ: Dict[str, str]) -> Dict[str, str]:
     creds: Dict[str, str] = {}
     for key in ENV_KEYS:
-        value = file_values.get(key) or environ.get(key) or ""
-        if not value and is_tty:
-            value = (secret_prompt if key == "TAIGA_PASSWORD" else prompt)(f"{key}: ").strip()
-        if not value:
-            raise SetupError(
-                f"{key} is not set: pass --env-file, export it, or run interactively"
-            )
+        value = environ.get(key, "")
+        if not value.strip():
+            raise SetupError(f"{key} is not set: export it, or load it with direnv or envtool")
         creds[key] = value
     return creds
 
@@ -354,7 +327,6 @@ def render_table(plan: Plan) -> str:
 def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Set up Taiga project statuses, priorities, tags and the roadmap wiki page.")
     parser.add_argument("--project", type=int, default=DEFAULT_PROJECT_ID)
-    parser.add_argument("--env-file", help="KEY=VALUE file with TAIGA_API_URL, TAIGA_USERNAME, TAIGA_PASSWORD")
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--apply", action="store_true", help="make the writes (default is a dry run)")
     mode.add_argument("--check", action="store_true", help="exit 0 when complete, 2 when anything is missing")
@@ -365,15 +337,11 @@ def main(
     argv: Sequence[str],
     transport: Transport = urllib_transport,
     environ: Optional[Dict[str, str]] = None,
-    is_tty: Optional[bool] = None,
-    prompt: Callable[[str], str] = input,
-    secret_prompt: Callable[[str], str] = getpass.getpass,
 ) -> int:
     args = parse_args(argv)
     environ = dict(os.environ) if environ is None else environ
-    is_tty = sys.stdin.isatty() if is_tty is None else is_tty
     try:
-        creds = resolve_credentials(args.env_file, environ, is_tty, prompt, secret_prompt)
+        creds = resolve_credentials(environ)
         api = TaigaApi(creds["TAIGA_API_URL"], transport)
         api.login(creds["TAIGA_USERNAME"], creds["TAIGA_PASSWORD"])
         plan = build_plan(api, args.project)
@@ -391,10 +359,10 @@ def main(
         print(f"Taiga project {args.project} is missing {len(plan.missing)} item(s):")
         for item in plan.missing:
             print(f"  - {item}")
-        print("Run: python3 scripts/taiga_project_setup.py --env-file scripts/taiga-auth.env --apply")
+        print(f"Run: {APPLY_COMMAND}")
         return EXIT_INCOMPLETE
 
-    print(f"Taiga project {args.project}{'' if args.apply else ' (dry run)'}")
+    print(f"Taiga project {args.project}{'' if args.apply else ' (dry run)'} as {creds['TAIGA_USERNAME']}")
     print(render_table(plan))
     writes = (
         [f"POST {p} {json.dumps(d)}" for _, p, d in plan.creates]

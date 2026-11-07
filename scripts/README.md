@@ -8,17 +8,56 @@ Python 3.14 and bash (`curl`, `jq`, `git`, `gh`; `codex` for reviews). None of t
 
 | Variable | Used by | Notes |
 |---|---|---|
-| `TAIGA_API_URL`, `TAIGA_USERNAME`, `TAIGA_PASSWORD` | every Taiga script | Exported by the repo `.envrc` (direnv). `taiga_project_setup.py` also reads `--env-file` and prompts on a TTY |
+| `TAIGA_API_URL`, `TAIGA_USERNAME`, `TAIGA_PASSWORD` | every Taiga script | Read from the shell only. See [Credentials](#credentials) |
 | `GH_REPO` | monitor, codex review, merge train | Default `MrsBohemian/Cholobots`. Every `gh` call runs as `env -u GH_TOKEN gh ... --repo "$GH_REPO"`, because the exported `GH_TOKEN` cannot see that repo |
 | `MERGE_TRAIN_REMOTE`, `CODEX_REVIEW_REMOTE` | merge train, codex review | git remote holding PR branches, default `upstream` |
 | `MONITOR_ADVISORY_CHECKS`, `MONITOR_ADVISORY_REVIEWERS`, `MONITOR_RUN_REGISTRATION_GRACE_SECONDS` | monitor | See `--help` |
 | `CODEX_REVIEW_*` | codex review | See `--help` |
 
+### Credentials
+
+The scripts read the Taiga credentials from the shell and never from a file in this repo. The
+checkout's git-ignored `.envrc` loads them with direnv from the `project/growthgarage` scope of
+Jon's SOPS vault, `~/work/utils/jon-dev-env`. That scope holds the agent account, `slave1-codex`,
+which the scripts and the Taiga MCP server use day to day:
+
+```bash
+watch_file "$HOME/work/utils/jon-dev-env/secrets/project/growthgarage.enc.json"
+_dev_env_exports="$("$HOME/work/utils/jon-dev-env/scripts/envtool" export project/growthgarage)" || exit 1
+eval "$_dev_env_exports"; unset _dev_env_exports
+```
+
+On a new machine, set up `jon-dev-env` as its README describes. That means restoring the age
+identity, installing `sops` and `direnv`, and hooking direnv into Bash. Then create the `.envrc`
+above in this checkout and run `direnv allow`.
+
+`taiga_project_setup.py --apply` changes project settings, which the agent account cannot do. Jon
+stores his admin account once in a second scope, typing each value at a hidden prompt:
+
+```bash
+~/work/utils/jon-dev-env/scripts/envtool set project/growthgarage-admin TAIGA_API_URL   # https://backlog.growthgarage.org
+~/work/utils/jon-dev-env/scripts/envtool set project/growthgarage-admin TAIGA_USERNAME  # jonroberts
+~/work/utils/jon-dev-env/scripts/envtool set project/growthgarage-admin TAIGA_PASSWORD
+```
+
+The dry run and `--check` work with the agent account. The apply loads the admin scope into a
+subshell, so the admin password stays out of the interactive shell:
+
+```bash
+python3 scripts/taiga_project_setup.py
+(eval "$(~/work/utils/jon-dev-env/scripts/envtool export project/growthgarage-admin)" && python3 scripts/taiga_project_setup.py --apply)
+python3 scripts/taiga_project_setup.py --check
+```
+
+The dry run and the apply print the account they logged in as. If the apply reports
+`slave1-codex`, the admin scope is missing or incomplete, because `envtool export` prints nothing
+for a scope that does not exist.
+
 ## Taiga
 
 | Script | Purpose |
 |---|---|
-| `taiga_project_setup.py [--check\|--apply] [--env-file F]` | Adds the pipeline's statuses, `Urgent` priority, tags and the `cross-project-execution-order` wiki page; renumbers status order. Dry run by default; `--check` exits 2 when anything is missing. Copy `taiga-auth.env.example` to `taiga-auth.env` (git-ignored) for an admin run |
+| `taiga_project_setup.py [--check\|--apply]` | Adds the pipeline's statuses, `Urgent` priority, tags and the `cross-project-execution-order` wiki page; renumbers status order. Dry run by default; `--check` exits 2 when anything is missing. `--apply` needs the admin account, see [Credentials](#credentials) |
 | `taiga-story.sh <ref> [39] [--issue\|--epic] [--with-tasks]` | Fetch a story/issue/epic as JSON; exit 44 when the ref does not exist |
 | `taiga-epic.sh get <ref>` / `patch <ref> --description-file F [--version N]` | Read or replace an epic description (dependency diagram, hand-off); exit 3 on a version conflict, 44 when missing |
 | `taiga-comment.sh <id> "<text>" [--issue]` | Comment on a story or issue by internal id |

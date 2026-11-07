@@ -26,19 +26,21 @@ argument against member full names or emails, not Taiga usernames. Always write
 ## Prerequisite: project setup
 
 The pipeline uses statuses, a priority, tags and a wiki page that project 39 did not start with.
-Jon (Taiga admin) adds them once with `scripts/taiga_project_setup.py` (idempotent, never deletes
-or renames):
+Jon (Taiga admin) adds them once with `scripts/taiga_project_setup.py`, which is idempotent and
+never deletes or renames anything. The agent account cannot change project settings, so the
+`--apply` run loads Jon's admin credentials from the `project/growthgarage-admin` scope of
+`~/work/utils/jon-dev-env` into a subshell. `scripts/README.md` has the one-time `envtool set`
+commands.
 
 ```bash
-cp scripts/taiga-auth.env.example scripts/taiga-auth.env && $EDITOR scripts/taiga-auth.env
-python3 scripts/taiga_project_setup.py --env-file scripts/taiga-auth.env --apply
+(eval "$(~/work/utils/jon-dev-env/scripts/envtool export project/growthgarage-admin)" && python3 scripts/taiga_project_setup.py --apply)
 ```
 
 **Preflight rule.** Orchestrating skills (`overseer`, `fully-*`, `implement-epic`, `merge-train`,
 `triage-bugs`, `fix-bugs`, `parallel-fix-bugs`) run `python3 scripts/taiga_project_setup.py --check`
 once at startup. It checks the statuses, the Urgent priority, the pipeline/surface/source tags and
 the roadmap wiki page. Exit 0: proceed. Exit 2: stop, print the missing list and
-`Run: python3 scripts/taiga_project_setup.py --env-file scripts/taiga-auth.env --apply` for Jon
+`Run: (eval "$(~/work/utils/jon-dev-env/scripts/envtool export project/growthgarage-admin)" && python3 scripts/taiga_project_setup.py --apply)` for Jon
 (`triage-bugs --dry-run` prints them as a warning and continues, since it writes nothing).
 Leaf skills do not preflight.
 
@@ -210,7 +212,7 @@ exports them through direnv from the SOPS vault). Default project is 39.
 
 | Script | Use |
 |---|---|
-| `scripts/taiga_project_setup.py --check\|--apply [--env-file F]` | Project setup and the orchestrator preflight (above) |
+| `scripts/taiga_project_setup.py --check\|--apply` | Project setup and the orchestrator preflight (above) |
 | `scripts/taiga-story.sh <ref> [39] [--issue\|--epic] [--with-tasks]` | O(1) fetch by ref; JSON with `id`, status, tags, `created_date`, `modified_date`, `version` (none of which the MCP `get_issue` returns), tasks. The second argument is always read as the project id, so write `39` whenever a flag follows (`<ref> 39 --with-tasks`) |
 | `scripts/taiga-epic.sh get <ref>` / `patch <ref> --description-file <path> [--version <n>]` | Epic description edits (dependency diagram, `## Overseer hand-off`) |
 | `scripts/taiga-comment.sh <id> "<text>" [--issue]` | Comment by internal id (take `id` from `taiga-story.sh`) |
