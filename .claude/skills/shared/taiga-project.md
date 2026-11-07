@@ -36,8 +36,10 @@ python3 scripts/taiga_project_setup.py --env-file scripts/taiga-auth.env --apply
 
 **Preflight rule.** Orchestrating skills (`overseer`, `fully-*`, `implement-epic`, `merge-train`,
 `triage-bugs`, `fix-bugs`, `parallel-fix-bugs`) run `python3 scripts/taiga_project_setup.py --check`
-once at startup. Exit 0: proceed. Exit 2: stop, print the missing list and
-`Run: python3 scripts/taiga_project_setup.py --env-file scripts/taiga-auth.env --apply` for Jon.
+once at startup. It checks the statuses, the Urgent priority, the pipeline/surface/source tags and
+the roadmap wiki page. Exit 0: proceed. Exit 2: stop, print the missing list and
+`Run: python3 scripts/taiga_project_setup.py --env-file scripts/taiga-auth.env --apply` for Jon
+(`triage-bugs --dry-run` prints them as a warning and continues, since it writes nothing).
 Leaf skills do not preflight.
 
 ## Statuses
@@ -92,7 +94,8 @@ rubric is `docs/bug-triage.md`.
 ## Tags
 
 Taiga tags are free text; spell them exactly. Writes replace the whole tag list, so always
-read-modify-write.
+read-modify-write. `get_issue` / `get_story` return tags as `[name, color]` pairs;
+`update_issue(tags=[...])` / `update_story(tags=[...])` take plain names, so flatten before writing.
 
 **Pipeline tags** (created by the setup script)
 
@@ -112,15 +115,19 @@ read-modify-write.
 
 The two merge tags are defined in `.claude/skills/shared/merge-side-effects.md`.
 
-**Surface** (exactly one per bug): `product` (a bot command or dashboard behaviour; add the
-per-bot tag alongside it), `devx` (local setup, venv, env vars, Supabase local stack, seeding),
-`pipeline` (skills, agents, scripts, Taiga and GitHub automation), `ci` (GitHub Actions, once
-story #35 adds them).
+**Surface** (exactly one per bug): `product` (a bot command or dashboard behaviour; add every
+per-bot tag that applies alongside it, or none with a triage comment saying no bot could be
+determined), `devx` (local setup, venv, env vars, Supabase local stack, seeding), `pipeline`
+(skills, agents, scripts, Taiga and GitHub automation), `ci` (GitHub Actions, once story #35 adds
+them). `ci` and `devx` are the surface tags. The pre-existing topic tag `devex` (different
+spelling) and the other topic tags below are kept alongside the surface tag; "drop any second
+surface tag" applies only to `product`, `devx`, `pipeline` and `ci`.
 
 **Source** (exactly one per bug): `src:user`, `src:monitor`, `src:manual-test`, `src:pr-review`,
-`src:agent`, `src:jon`.
+`src:agent`, `src:jon`. The default when none is set is in `docs/bug-triage.md` ("Fields and tags").
 
-**Per-bot tags:** `metichebot`, `chismebot`, `crudobot`, `obijuan`, `vueltabot`, `guardabot`, `mobile`.
+**Per-bot tags** (one or more on a `product` bug): `metichebot`, `chismebot`, `guardabot`,
+`crudobot`, `obijuan`, `vueltabot`, `mobile`.
 
 **Topic tags in use:** `listeners`, `data-loss`, `timezone`, `devex`, `testing`, `ci`,
 `multi-business`, `help-text`, `closeout`, `receipts`, `leads`, `pings`, `time-tracking`,
@@ -204,7 +211,7 @@ exports them through direnv from the SOPS vault). Default project is 39.
 | Script | Use |
 |---|---|
 | `scripts/taiga_project_setup.py --check\|--apply [--env-file F]` | Project setup and the orchestrator preflight (above) |
-| `scripts/taiga-story.sh <ref> [39] [--issue\|--epic] [--with-tasks]` | O(1) fetch by ref; JSON with `id`, status, tags, tasks. The second argument is always read as the project id, so write `39` whenever a flag follows (`<ref> 39 --with-tasks`) |
+| `scripts/taiga-story.sh <ref> [39] [--issue\|--epic] [--with-tasks]` | O(1) fetch by ref; JSON with `id`, status, tags, `created_date`, `modified_date`, `version` (none of which the MCP `get_issue` returns), tasks. The second argument is always read as the project id, so write `39` whenever a flag follows (`<ref> 39 --with-tasks`) |
 | `scripts/taiga-epic.sh get <ref>` / `patch <ref> --description-file <path> [--version <n>]` | Epic description edits (dependency diagram, `## Overseer hand-off`) |
 | `scripts/taiga-comment.sh <id> "<text>" [--issue]` | Comment by internal id (take `id` from `taiga-story.sh`) |
 | `scripts/taiga-wiki.sh get\|patch <slug\|page-id> ...` | Wiki page body via a file; a slug resolves in project 39 |

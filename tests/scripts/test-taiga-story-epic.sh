@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ABOUTME: Unit tests for taiga-story.sh's --epic lookup and its unconditional description field.
-# ABOUTME: Verifies the epics/by_ref endpoint is used, the epic 404 label, and that description survives intact, using mocked curl.
+# ABOUTME: Verifies the epics/by_ref endpoint, the epic 404 label, intact description, and the date/version keys, using mocked curl.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -64,7 +64,7 @@ case "$URL" in
     */api/v1/epics/by_ref*|*/api/v1/userstories/by_ref*|*/api/v1/issues/by_ref*)
         HTTP_CODE="${MOCK_HTTP_CODE:-200}"
         if [[ "$HTTP_CODE" == "200" ]]; then
-            RESPONSE="{\"id\":100,\"ref\":9999,\"subject\":\"Test item\",\"description\":\"${DIAGRAM}\",\"description_html\":\"<p>ignored</p>\",\"status\":15,\"status_extra_info\":{\"name\":\"New\",\"is_closed\":false},\"milestone\":null,\"milestone_name\":null,\"milestone_slug\":null,\"tags\":[],\"is_closed\":false}"
+            RESPONSE="{\"id\":100,\"ref\":9999,\"subject\":\"Test item\",\"description\":\"${DIAGRAM}\",\"description_html\":\"<p>ignored</p>\",\"status\":15,\"status_extra_info\":{\"name\":\"New\",\"is_closed\":false},\"milestone\":null,\"milestone_name\":null,\"milestone_slug\":null,\"tags\":[],\"is_closed\":false,\"created_date\":\"2026-11-06T15:00:00.000Z\",\"modified_date\":\"2026-11-07T09:30:00.000Z\",\"version\":7}"
         else
             RESPONSE='{"detail":"Not found."}'
         fi
@@ -178,6 +178,51 @@ test_userstory_output_includes_description() {
 }
 
 # ============================================================
+# Test: created_date, modified_date and version for every item type
+# ============================================================
+# The MCP get_issue cannot return these; triage-bugs reads them here for the
+# triage window, the 14-day Needs Info expiry and the 90-day Low review.
+test_output_includes_dates_and_version() {
+    info "Test: output includes created_date, modified_date and version for story, issue and epic"
+    setup_mock_curl
+    export MOCK_HTTP_CODE=200
+
+    local flag label output
+    for flag in "" "--issue" "--epic"; do
+        label="${flag:-story}"
+        # shellcheck disable=SC2086
+        output=$(run_script 9999 39 $flag 2>/dev/null)
+
+        if [[ "$(json_key created_date <<< "$output")" == "2026-11-06T15:00:00.000Z" ]]; then
+            pass "$label: created_date present"
+        else
+            fail "$label: expected created_date, got: $output"
+        fi
+        if [[ "$(json_key modified_date <<< "$output")" == "2026-11-07T09:30:00.000Z" ]]; then
+            pass "$label: modified_date present"
+        else
+            fail "$label: expected modified_date, got: $output"
+        fi
+        if [[ "$(json_key version <<< "$output")" == "7" ]]; then
+            pass "$label: version present"
+        else
+            fail "$label: expected version 7, got: $output"
+        fi
+    done
+
+    # Additive: the existing keys keep their order and the new ones follow.
+    local keys
+    keys=$(run_script 9999 39 --issue 2>/dev/null | python3 -c "import json,sys; print(','.join(json.load(sys.stdin)))")
+    if [[ "$keys" == "id,ref,subject,description,status,status_extra_info,milestone,milestone_name,milestone_slug,tags,is_closed,created_date,modified_date,version" ]]; then
+        pass "Existing key order kept; new keys appended"
+    else
+        fail "Unexpected key order: $keys"
+    fi
+
+    unset MOCK_HTTP_CODE
+}
+
+# ============================================================
 # Test: epic 404 exits 44 and says "epic"
 # ============================================================
 test_epic_404_exits_44() {
@@ -211,6 +256,7 @@ echo ""
 test_epic_flag_uses_epics_endpoint
 test_epic_output_includes_description
 test_userstory_output_includes_description
+test_output_includes_dates_and_version
 test_epic_404_exits_44
 
 echo ""

@@ -14,7 +14,8 @@ usage() {
     echo ""
     echo "Env vars required: TAIGA_API_URL, TAIGA_USERNAME, TAIGA_PASSWORD"
     echo ""
-    echo "Output: compact JSON with id, ref, subject, description, status, status_extra_info, milestone, milestone_name, milestone_slug, tags, is_closed"
+    echo "Output: compact JSON with id, ref, subject, description, status, status_extra_info, milestone, milestone_name, milestone_slug, tags, is_closed,"
+    echo "        created_date, modified_date, version (every item type)"
     echo "        (plus 'tasks' array when --with-tasks is used)"
     echo ""
     echo "Exit codes: 0 success, 44 item not found (404), 1 any other error"
@@ -112,6 +113,9 @@ out = {
     'milestone_slug': d.get('milestone_slug'),
     'tags': d.get('tags'),
     'is_closed': d.get('is_closed'),
+    'created_date': d.get('created_date'),
+    'modified_date': d.get('modified_date'),
+    'version': d.get('version'),
 }
 if tasks is not None:
     out['tasks'] = tasks

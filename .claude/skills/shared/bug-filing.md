@@ -18,9 +18,10 @@ have new evidence, add it with `add_comment(project=39, ref=<ref>, text="<eviden
 
 ## Step 3: Classify per `docs/bug-triage.md`
 
-1. **Surface** (exactly one): `product`, `devx`, `pipeline`, `ci`. A `product` bug also gets the
-   per-bot tag (`metichebot`, `chismebot`, `crudobot`, `obijuan`, `vueltabot`, `guardabot`, or
-   `mobile` for the dashboards), plus any existing topic tag that fits (`listeners`, `data-loss`,
+1. **Surface** (exactly one): `product`, `devx`, `pipeline`, `ci`. A `product` bug also gets every
+   per-bot tag that applies (one or more of `metichebot`, `chismebot`, `guardabot`, `crudobot`,
+   `obijuan`, `vueltabot`, `mobile` for the dashboards); when no bot can be determined, add none
+   and say so in the description. Add any existing topic tag that fits (`listeners`, `data-loss`,
    `timezone`, ...).
 2. **Source** (exactly one): `src:user`, `src:monitor`, `src:manual-test`, `src:pr-review`,
    `src:agent`, `src:jon`. Skills filing on their own behalf use `src:agent`; the manual-testing

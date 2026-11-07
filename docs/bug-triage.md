@@ -25,13 +25,18 @@ once Jon has run `scripts/taiga_project_setup.py --apply`.
 | Status | `New`, `In progress`, `Ready for review`, `Ready for test`, `Closed`, `Blocked`, `Needs Info`, `Rejected`, `Postponed` |
 
 **Surface** (exactly one): `product` (a bot command, listener, scheduler or dashboard as users
-experience it; add the per-bot tag `metichebot`, `chismebot`, `crudobot`, `obijuan`, `vueltabot`,
-`guardabot` or `mobile`), `devx` (local setup, venv, env vars, Supabase local stack, seeding,
+experience it; add every per-bot tag that applies, one or more of `metichebot`, `chismebot`,
+`guardabot`, `crudobot`, `obijuan`, `vueltabot`, `mobile`; when no bot can be determined, add none
+and say so in the triage comment), `devx` (local setup, venv, env vars, Supabase local stack, seeding,
 docs for those), `pipeline` (skills, agents, scripts, Taiga and GitHub automation), `ci` (GitHub
 Actions and failures that only show there; story #35).
 
 **Source** (exactly one): `src:user` (Heaven, Daniel or the crew), `src:monitor` (an automated
-production signal), `src:manual-test`, `src:pr-review`, `src:agent`, `src:jon`.
+production signal), `src:manual-test`, `src:pr-review`, `src:agent`, `src:jon`. An existing source
+tag stands. **Default when none is set:** bugs filed from the 2026-11-06 assessment (bug refs 1 to
+57) are `src:jon` (Jon directed the assessment); any other bug with no source tag is `src:user`,
+because every agent filing path sets its source tag at creation (`bug-filing.md`), so an untagged
+bug was filed by a person in the Taiga UI. Triage never guesses beyond that.
 
 **State:** `triaged`, `llm-analyzed`, `pre-existing-failure` (only alongside `ci` or `devx`),
 `escalation-needed`. Keep existing topic tags (`listeners`, `data-loss`, `timezone`, ...).
@@ -79,26 +84,37 @@ with a documented workaround: one level down.
 | Low | 1 week | when convenient | none; reviewed at 90 days |
 
 Only "triaged within" (from `created_date`) is checked by the sweep; the rest is reviewed by Jon.
+The MCP `get_issue` returns no dates or version; read `created_date`, `modified_date` and `version`
+with `scripts/taiga-story.sh <ref> 39 --issue`.
 
 ## Routing rules
 
-- **Needs Info**: expected behaviour, actual behaviour, or how to reproduce is missing. Comment what
-  is missing. No reply within 14 days → `Rejected` with a comment; reopen when it arrives.
-- **Rejected**: duplicate (comment `Duplicate of #<ref>`), not a bug (works as designed; consider
-  filing an `Enhancement`), or stale Needs Info.
-- **Closed**: a merged PR claims the bug (ref in the title as `#N:` or `(bug #N)`, or a
-  `Fixes`/`Closes`/`Resolves #N` body line; a prose mention is not a claim). Comment `Closed by PR #N`.
+- **Needs Info**: the description fails the completeness test (Definition of triaged, item 2).
+  Comment which part is missing. No reply within 14 days → `Rejected` with a comment; reopen when it
+  arrives.
+- **Rejected**: duplicate, not a bug (works as designed; consider filing an `Enhancement`), or stale
+  Needs Info. Two bugs are duplicates when they share the root cause at the same code location; the
+  same symptom from different causes is not a duplicate. The later ref is Rejected with the comment
+  `Duplicate of #<earlier ref>`.
+- **Closed**: a merged PR claims the bug. Claims come from GitHub only (Taiga comments are not
+  scanned) and use the grammar in `scripts/taiga_closing_refs.py`: a `#N:` title prefix, a
+  `fix(#N):` scope, a trailing `(bug #N)`, a standalone `Fixes`/`Closes`/`Resolves #N` body line,
+  or, when none of those is present, the branch name. A bare `#N` mention is never a claim. Comment
+  `Closed by PR #N`.
 - **Postponed**: Jon's call only, usually for a Low bug at its 90-day review or one that waits on an
   epic (for example multi-business work under #3). The sweep lists candidates; it never postpones.
 
 ## Definition of triaged
 
 1. Type is `Bug`.
-2. The description states expected behaviour, actual behaviour, and how to reproduce or where it
-   was observed (command, channel, account, or file and line). Otherwise: Needs Info.
+2. The description is complete: it contains (a) a reproduction or a `file:line` citation and
+   (b) an observed-versus-expected statement in any wording. The `What happens / Repro / Fix
+   direction` form of the assessment issues counts, as does the filing template below. Only when
+   (a) or (b) is missing: Needs Info.
 3. Duplicates were searched and none found, or the issue was closed as a duplicate.
 4. Severity is set per the table.
-5. Exactly one surface tag and exactly one source tag are set (plus the per-bot tag for `product`).
+5. Exactly one surface tag and exactly one source tag are set (plus every per-bot tag that applies
+   for `product`, or none with a comment saying no bot could be determined).
 6. Priority is set per the matrix and modifiers, or overridden with a comment.
 7. The `triaged` tag is applied.
 
@@ -123,19 +139,28 @@ with a dry-run mode that prints proposed changes without writing. Base URL
    `x-disable-pagination: True`, keep those without the `triaged` tag. (Same set as
    `python3 scripts/taiga_select_issues.py --purpose triage`.)
 3. For each candidate, in ref order:
-   1. Description check (item 2 above). Fails → status `Needs Info` + comment; next issue.
+   1. Completeness test (item 2 above). Fails → status `Needs Info` + comment; next issue.
    2. Duplicates and prior fixes: `GET /search?project=39&text=<token>` with one or two distinctive
-      tokens at a time. Duplicate → `Rejected` + comment; next. A merged PR claims it → `Closed` +
-      comment; next. An open PR claims it → keep the status, continue tagging.
-   3. Surface tag, then source tag (default `src:agent` when a skill filed it, `src:jon` when Jon
-      filed it by hand with no other signal).
+      tokens at a time; apply the duplicate rule under "Routing rules". Duplicate → `Rejected` +
+      comment; next. PR claims: fetch the PR list once per sweep (`gh pr list --repo
+      MrsBohemian/Cholobots --state all --limit 200 --json number,title,body,headRefName,state`)
+      and match each bug with the claim grammar under "Routing rules"; never read Taiga comments for
+      PR markers. A merged PR claims it → `Closed` + comment; next. An open PR claims it → keep the
+      status, continue tagging.
+   3. Surface tag (for `product`, every per-bot tag that applies), then source tag (the default
+      under "Fields and tags").
    4. Confirm or correct severity; derive priority.
    5. One write: `PATCH /issues/<id>` with `version`, `severity`, `priority`, `tags` (existing tags
-      plus surface, source, `triaged`; drop any second surface tag) and a `comment` stating the
-      severity and priority and any override reason.
+      plus surface, source, `triaged`; drop any second surface tag among `product`/`devx`/
+      `pipeline`/`ci`, keeping topic tags such as `devex`) and a `comment` stating the
+      severity and priority and any override reason. Through the MCP tools this is two calls,
+      because `update_issue` has no comment parameter: `update_issue(...)` then
+      `add_comment(project=39, ref=, text=, entity_type="issue")`. `get_issue` returns tags as
+      `[name, color]` pairs; `update_issue(tags=[...])` takes plain names.
 4. Expire Needs Info older than 14 days (`modified_date`) to `Rejected` with a comment. List,
-   without moving, Low bugs untouched for 90 days.
-5. Report in this order: Urgent bugs (each with `Run /fix-single-bug <ref> now`), High bugs,
+   without moving, Low bugs untouched for 90 days (`modified_date`).
+5. Report in this order: Urgent bugs by the priority this sweep proposes, not the current Taiga
+   priority (each with `Run /fix-single-bug <ref> now`), High bugs,
    counts by priority and surface, bugs past their triage window (skip on the first sweep of an
    untriaged backlog), overrides, issues closed or rejected, issues sent to Needs Info, Low bugs
    due for review.

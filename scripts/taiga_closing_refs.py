@@ -32,7 +32,9 @@ BODY_CLAIM_PATTERN = re.compile(
 # Only branch prefixes that carry implementation. "docs/story-2206-..." and
 # "design/epic-2167-..." name an item without implementing it, and
 # "dependabot/..." never refers to Taiga at all.
-BRANCH_CLAIM_PATTERN = re.compile(r"^(?:feature|fix)/.*[-/_](\d+)$")
+# Both branch shapes claim: "fix/<ref>-<slug>" (this repo's convention) and
+# "fix/<slug>-<ref>" (you-thon's). A leading ref wins when both are present.
+BRANCH_CLAIM_PATTERN = re.compile(r"^(?:feature|fix)/(?:(\d+)(?:[-/_].*)?|.*[-/_](\d+))$")
 
 
 def extract_closing_refs(branch, title, body):
@@ -53,7 +55,7 @@ def extract_closing_refs(branch, title, body):
     if not refs and branch:
         match = BRANCH_CLAIM_PATTERN.match(branch)
         if match:
-            refs.append(int(match.group(1)))
+            refs.append(int(match.group(1) or match.group(2)))
 
     seen = set()
     return [ref for ref in refs if not (ref in seen or seen.add(ref))]

@@ -74,6 +74,14 @@ assert_ref "Branch fallback: feature/slug-ref" "2256" \
     "$(extract_ref "" "" "feature/accrual-idempotency-2256")"
 assert_ref "Branch fallback: fix/taiga-sync-on-merge-1364" "1364" \
     "$(extract_ref "" "" "fix/taiga-sync-on-merge-1364")"
+assert_ref "Branch fallback: fix/ref-slug (this repo's convention)" "4" \
+    "$(extract_ref "" "" "fix/4-unknown-users-overwrite-heaven")"
+assert_ref "Branch fallback: feature/ref-slug" "70" \
+    "$(extract_ref "" "" "feature/70-pipeline-port")"
+assert_ref "Branch fallback: bare feature/ref" "70" \
+    "$(extract_ref "" "" "feature/70")"
+assert_ref "Branch fallback: leading ref wins over trailing digits" "21" \
+    "$(extract_ref "" "" "fix/21-retry-after-500")"
 
 info "Priority: title claim wins over branch"
 assert_ref "Title takes priority over branch" "100" \
