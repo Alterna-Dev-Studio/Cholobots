@@ -77,7 +77,7 @@ async def on_message(message: discord.Message):
     if message.attachments:
         content = (message.content or "").strip().lower()
 
-        attachment_commands = {"!greceipt", "!crudoreceipt", "!tengo"}
+        attachment_commands = {"!crudoreceipt", "!tengo"}
         command_name = content.split(maxsplit=1)[0] if content else ""
 
         if command_name in attachment_commands:
@@ -152,81 +152,8 @@ async def cholobots(ctx):
 
     ...And if you're lucky, you get to meet Obi Juan Que Homie
         
-    Type `!queso` to see what the Cholobots do.
+    Type `!metichebot`, `!chismebot`, `!guardabot` or `!crudobot` to see what each one can do right now.
     """
     await ctx.send(msg)
 
-@bot.command(name="queso")
-async def queso(ctx):
-    msg = """
-    🧀 HOW THE CHOLOBOTS ACTUALLY WORK
-        
-    You don’t use all four at once.
-    You bring them in when you need them.
-        
-    –––––––––––––––––
-        
-    🧠 METICHEBOT — RUN YOUR WEEK
-    Start here.
-        
-    She will:
-    • get your weekly goal
-    • track your jobs, estimates, invoices
-    • build your schedule
-    • check in on you so you don’t drift into the void
-        
-    Use her when:
-    you need direction, structure, or accountability
-        
-    –––––––––––––––––
-        
-    💬 CHISMEBOT — TRACK PEOPLE
-     Use her right after conversations.
-        
-    She will:
-    • clean up messy notes
-    • turn interactions into usable contact info
-    • help you remember who matters and why
-        
-    Use her when:
-    you meet someone, get a lead, or feel like “I should remember this”
-        
-    –––––––––––––––––
-        
-    📦 GUARDABOT — TRACK STUFF
-    Use him during jobs.
-        
-    He will:
-    • track materials and spending
-    • help you find things
-    • keep your physical world from turning into chaos
-        
-    Use him when:
-    you’re buying, moving, or losing materials
-        
-    –––––––––––––––––
-        
-    📊 CRUDOBOT — MAKE SENSE OF IT
-    Use him after the work is done.
-        
-    He will:
-    • close out jobs
-    • show you what actually made money
-    • help you process what worked and what didn’t
-        
-    Use him when:
-    you need clarity, numbers, or post-mortem energy
-        
-    –––––––––––––––––
-        
-    Type:
-    !metichebot
-    !chismebot
-    !guardabot
-    !crudobot
-        
-    to see what each one can do right now.
-    """
-    await ctx.send(msg)
-    
 bot.run(DISCORD_TOKEN)
