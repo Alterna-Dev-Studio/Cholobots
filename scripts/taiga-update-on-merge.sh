@@ -272,7 +272,12 @@ if [[ "$ITEM_TYPE" == "userstories" ]]; then
     OPEN_TASKS=$(python3 -c "
 import json, sys
 tasks = json.load(open(sys.argv[1]))
-open_tasks = [t for t in tasks if not t.get('is_closed', False)]
+# The task status's own is_closed flag is authoritative; the item-level flag
+# can disagree with it, so it is only the fallback.
+def closed(t):
+    sei = t.get('status_extra_info') or {}
+    return sei.get('is_closed', t.get('is_closed', False))
+open_tasks = [t for t in tasks if not closed(t)]
 for t in open_tasks:
     print(f\"{t['id']}:{t['version']}:{t.get('ref', '?')}\")
 " "$TMPDIR_SCRIPT/tasks.json")
@@ -283,6 +288,7 @@ for t in open_tasks:
         log "Leaving $(wc -l <<< "$OPEN_TASKS" | tr -d ' ') open task(s): no close-tasks-on-merge label or tag"
     else
         TASK_COUNT=0
+        TASK_FAILURES=0
         while IFS= read -r task_line; do
             TASK_ID=$(echo "$task_line" | cut -d: -f1)
             TASK_VERSION=$(echo "$task_line" | cut -d: -f2)
@@ -304,6 +310,7 @@ print(json.dumps({'status': int(sys.argv[1]), 'version': int(sys.argv[2])}))
 
                 if [[ "$HTTP_CODE" -ne 200 ]]; then
                     warn "Failed to close task #${TASK_REF} (id=${TASK_ID}): HTTP $HTTP_CODE"
+                    TASK_FAILURES=$((TASK_FAILURES + 1))
                 else
                     log "Closed task #${TASK_REF}"
                 fi
@@ -311,6 +318,12 @@ print(json.dumps({'status': int(sys.argv[1]), 'version': int(sys.argv[2])}))
             TASK_COUNT=$((TASK_COUNT + 1))
         done <<< "$OPEN_TASKS"
         log "Processed ${TASK_COUNT} open task(s)"
+        if [[ "$TASK_FAILURES" -gt 0 ]]; then
+            # Every task was attempted; failing now turns the workflow run red
+            # so the story is not left with open tasks behind a green sync.
+            err "Failed to close ${TASK_FAILURES} of ${TASK_COUNT} open task(s) on story #${REF}"
+            exit 1
+        fi
     fi
 fi
 

@@ -656,18 +656,22 @@ trap cleanup EXIT
 # under way, the next tick would put a regular *file* back at the job-dir path
 # — wedging the PR permanently, because this owner's own `> "$JOBDIR/env"` then
 # fails with "Not a directory" and every later invocation's atomic mkdir fails
-# against the leftover file. The -d guard additionally retires a heartbeat
-# whose owner was killed hard enough to skip stop_heartbeat, so an orphan does
-# not spin for the rest of the job.
+# against the leftover file. The heartbeat also receives this script's pid ($$)
+# and exits once that process is gone. An owner killed hard enough to skip
+# stop_heartbeat (SIGKILL, the OOM-killer) would otherwise leave the heartbeat
+# refreshing a pid-less job dir forever: joiners would see it as live, report
+# REVIEW_PENDING indefinitely and never reclaim it. The owner pid comes first
+# and the job dir stays last so the process listing keeps its shape.
 HEARTBEAT_PERIOD=$(( CODEX_REVIEW_JOB_INIT_TIMEOUT_SECONDS / 4 ))
 [[ "$HEARTBEAT_PERIOD" -ge 1 ]] || HEARTBEAT_PERIOD=1
 setsid bash -c '
     while :; do
-        sleep "$1"
-        [[ -d "$2" ]] || exit 0
-        touch -c "$2" 2>/dev/null || exit 0
+        sleep "$2"
+        kill -0 "$1" 2>/dev/null || exit 0
+        [[ -d "$3" ]] || exit 0
+        touch -c "$3" 2>/dev/null || exit 0
     done
-' _ "$HEARTBEAT_PERIOD" "$JOBDIR" &
+' _ "$$" "$HEARTBEAT_PERIOD" "$JOBDIR" &
 HEARTBEAT_PID=$!
 
 git fetch "$CODEX_REVIEW_REMOTE" "$BASE_REF" "refs/pull/$PR/head" >/dev/null 2>&1 || {

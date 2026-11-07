@@ -155,33 +155,6 @@ class TestStateIncrementFailure:
 class TestEscalationAtThreshold:
     """Exits with code 12 when failures >= max."""
 
-    def test_escalation_on_monitor_failure(self, monkeypatch, tmp_path):
-        """When monitor script fails and failure count reaches threshold, main() returns EXIT_ESCALATED."""
-        state_path = str(tmp_path / "state.json")
-        # Pre-seed state with failures at threshold - 1
-        existing = {
-            "prNumber": 42,
-            "maxFailures": 2,
-            "buildFailureCount": 1,
-            "phase": "monitoring",
-            "taigaId": None,
-            "taigaType": None,
-            "lastResult": None,
-        }
-        with open(state_path, "w") as f:
-            json.dump(existing, f)
-
-        monkeypatch.setattr("remediate_pr.run_cmd", lambda cmd, check=True, capture=True: (1, "", "CI failed"))
-        monkeypatch.setattr("sys.argv", ["remediate_pr.py", "--resume", state_path])
-
-        result = main()
-        assert result == EXIT_ESCALATED
-
-        with open(state_path) as f:
-            state = json.load(f)
-        assert state["phase"] == "escalated"
-        assert state["buildFailureCount"] == 2
-
     def test_escalation_on_checks_failing(self, monkeypatch, tmp_path):
         """When parsed result is checks_failing and count reaches threshold, escalate."""
         state_path = str(tmp_path / "state.json")
@@ -437,22 +410,28 @@ class TestCommentsFlow:
 
 
 class TestMonitorScriptFailure:
-    """When monitor script itself fails (non-zero exit), increments failures and returns EXIT_BUILD_FIX."""
+    """A non-zero monitor exit is an API/network error, not a failing check.
 
-    def test_monitor_failure_below_threshold(self, monkeypatch, tmp_path):
+    monitor-pr-stability.sh reports CHECKS_FAILING with exit 0, so a non-zero
+    exit must neither count toward escalation nor dispatch a build-fix agent.
+    """
+
+    def _seed(self, tmp_path, failures=0, max_failures=5):
         state_path = str(tmp_path / "state.json")
-        existing = {
-            "prNumber": 42,
-            "maxFailures": 5,
-            "buildFailureCount": 0,
-            "phase": "monitoring",
-            "taigaId": None,
-            "taigaType": None,
-            "lastResult": None,
-        }
         with open(state_path, "w") as f:
-            json.dump(existing, f)
+            json.dump({
+                "prNumber": 42,
+                "maxFailures": max_failures,
+                "buildFailureCount": failures,
+                "phase": "monitoring",
+                "taigaId": None,
+                "taigaType": None,
+                "lastResult": None,
+            }, f)
+        return state_path
 
+    def test_monitor_failure_returns_error_without_counting(self, monkeypatch, tmp_path):
+        state_path = self._seed(tmp_path)
         monkeypatch.setattr(
             "remediate_pr.run_cmd",
             lambda cmd, check=True, capture=True: (1, "", "Something went wrong"),
@@ -460,12 +439,33 @@ class TestMonitorScriptFailure:
         monkeypatch.setattr("sys.argv", ["remediate_pr.py", "--resume", state_path])
 
         result = main()
-        assert result == EXIT_BUILD_FIX
+        assert result == EXIT_ERROR
 
         with open(state_path) as f:
             state = json.load(f)
-        assert state["buildFailureCount"] == 1
-        assert state["phase"] == "awaiting_fix"
+        assert state["buildFailureCount"] == 0
+        assert state["phase"] == "error"
+
+    def test_monitor_failure_at_threshold_does_not_escalate(self, monkeypatch, tmp_path):
+        state_path = self._seed(tmp_path, failures=1, max_failures=2)
+        monkeypatch.setattr("remediate_pr.run_cmd", lambda cmd, check=True, capture=True: (1, "", "HTTP 502"))
+        monkeypatch.setattr("sys.argv", ["remediate_pr.py", "--resume", state_path])
+
+        assert main() == EXIT_ERROR
+
+        with open(state_path) as f:
+            assert json.load(f)["buildFailureCount"] == 1
+
+    def test_monitor_failure_writes_no_action_request(self, monkeypatch, tmp_path):
+        state_path = self._seed(tmp_path)
+        written = []
+        monkeypatch.setattr("remediate_pr.run_cmd", lambda cmd, check=True, capture=True: (1, "", "HTTP 502"))
+        monkeypatch.setattr("remediate_pr.write_action_request", lambda *a, **k: written.append((a, k)))
+        monkeypatch.setattr("sys.argv", ["remediate_pr.py", "--resume", state_path])
+
+        main()
+
+        assert written == []
 
 
 class TestParseArgsMissingFlagValues:
@@ -590,7 +590,7 @@ class TestMonitorOutputCapture:
         monkeypatch.setattr("sys.argv", ["remediate_pr.py", "--resume", state_path])
 
         result = main()
-        assert result == EXIT_BUILD_FIX
+        assert result == EXIT_ERROR
 
         with open(state_path) as f:
             state = json.load(f)
@@ -1011,3 +1011,22 @@ class TestCodexReviewHook:
 
         assert result == EXIT_STABLE
         assert any("monitor-pr-stability.sh" in str(c) for c in commands)
+
+
+class TestRemediateFilesStayPrivate:
+    def test_state_and_action_files_are_0600_under_a_permissive_umask(self, tmp_path):
+        import os
+        from remediate_pr import write_action_request
+        state_path = str(tmp_path / "state.json")
+        action_path = str(tmp_path / "action.json")
+        old = os.umask(0o000)
+        try:
+            sm = StateManager(state_path)
+            sm.init(pr_number=42, max_failures=5, taiga_id=None, taiga_type=None)
+            sm.update(phase="monitoring")
+            write_action_request(action_path, "fix_build", 42, state_path, {})
+        finally:
+            os.umask(old)
+        assert os.stat(state_path).st_mode & 0o777 == 0o600
+        assert os.stat(action_path).st_mode & 0o777 == 0o600
+

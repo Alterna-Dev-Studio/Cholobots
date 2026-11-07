@@ -43,6 +43,7 @@ from datetime import datetime, timezone
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "lib"))
 from dependency_parser import parse_dependency_diagram
 from integration_branch import parse_integration_branch
+from private_files import write_json_private
 from stability_parser import parse_stability_result
 
 
@@ -275,16 +276,14 @@ class StateManager:
 
     def _save(self):
         """Save state to disk atomically (write temp + rename)."""
-        tmp = f"{self.state_path}.tmp.{os.getpid()}"
-        with open(tmp, "w") as f:
-            json.dump(self._state, f, indent=2)
-        os.rename(tmp, self.state_path)
+        write_json_private(self.state_path, self._state)
 
 
 def extract_taiga_ref(branch, title, body):
     """Extract a Taiga ref number from PR branch, title, or body.
 
-    Looks for #<ref> in title/body, or delimiter-bounded ref in branch name.
+    Order: integration branch, conventional feature/fix branch, #<ref> in
+    title/body, then any delimiter-bounded ref in the branch name.
     Returns the ref as an int, or None if not found.
     """
     # An integration branch names the child story, not the epic in its own
@@ -292,6 +291,14 @@ def extract_taiga_ref(branch, title, body):
     parsed = parse_integration_branch(branch)
     if parsed:
         return parsed[1]
+
+    # A conventional feature/<ref>-<slug> or fix/<ref>-<slug> branch names its
+    # own story unambiguously. A title or body may mention a parent or sibling
+    # story, so it must not outrank that.
+    if branch:
+        conventional = re.match(r"(?:feature|fix)/(\d+)(?:-|$)", branch)
+        if conventional:
+            return int(conventional.group(1))
 
     # Check title and body for #<ref> pattern
     for text in [title, body]:
@@ -598,6 +605,10 @@ def story_pr_landed(ref):
     and a story whose only PRs were closed unmerged all answer False. A PR is
     attributed to the story with extract_taiga_ref (branch, then title/body),
     and integration PRs never count as a story's own PR.
+
+    Raises RuntimeError when the listing reached PARENT_PR_LIST_LIMIT: gh stops
+    there without saying so, so a merged parent may be missing, and "not
+    landed" would be a wrong answer rather than a failed lookup.
     """
     rc, stdout, _ = run_cmd(
         gh_cmd(f"pr list --state all --limit {PARENT_PR_LIST_LIMIT} "
@@ -610,6 +621,11 @@ def story_pr_landed(ref):
         listed = json.loads(stdout)
     except ValueError:
         return False
+    if len(listed) >= PARENT_PR_LIST_LIMIT:
+        raise RuntimeError(
+            f"The all-state PR listing reached its {PARENT_PR_LIST_LIMIT}-PR limit, so it "
+            f"may be missing story #{ref}'s PR"
+        )
     states = set()
     for pr in listed:
         branch = pr.get("headRefName", "") or ""
@@ -643,7 +659,11 @@ def unlanded_integration_parents(branch):
     if not parents:
         log(f"Epic #{epic_ref} declares no parents for story #{story_ref}")
         return None
-    return [ref for ref in sorted(parents) if not story_pr_landed(ref)]
+    try:
+        return [ref for ref in sorted(parents) if not story_pr_landed(ref)]
+    except RuntimeError as exc:
+        log(f"Cannot verify parents of integration branch {branch}: {exc}")
+        return None
 
 
 def generate_summary(state):
@@ -774,6 +794,17 @@ def run_build_checks():
     return run_cmd(UNIT_TEST_CMD, check=False)
 
 
+def action_path_for(state_path):
+    """The action-request path that belongs to ``state_path``.
+
+    The state file name is unique per train (mkstemp), so deriving the action
+    path from it keeps two trains started in the same second from replacing
+    each other's request. It still matches /tmp/merge-train-*-action.json.
+    """
+    root = state_path[:-5] if state_path.endswith(".json") else state_path
+    return f"{root}-action.json"
+
+
 def write_action_request(action_path, action, pr, state_file, details):
     """Write an action-request JSON file for the skill wrapper.
 
@@ -790,10 +821,7 @@ def write_action_request(action_path, action, pr, state_file, details):
         "state_file": state_file,
         "details": details,
     }
-    tmp = f"{action_path}.tmp.{os.getpid()}"
-    with open(tmp, "w") as f:
-        json.dump(data, f, indent=2)
-    os.rename(tmp, action_path)
+    write_json_private(action_path, data)
 
 
 BUILD_LOG_TAIL_LINES = 100
@@ -1142,7 +1170,7 @@ def process_pr(sm, index, target, state_path):
     pr_num = pr["number"]
     branch = pr["branch"]
     ts = int(time.time())
-    action_path = f"/tmp/merge-train-{ts}-action.json"
+    action_path = action_path_for(state_path)
 
     # A halt is a stop the train may not drive past on its own. The paths that
     # set one exit without advancing, so --resume comes straight back here.
@@ -1189,9 +1217,19 @@ def process_pr(sm, index, target, state_path):
             view = json.loads(stdout)
         except ValueError:
             view = {}
-        pr_state = (view.get("state") or "").strip()
-        live_base = (view.get("baseRefName") or "").strip()
-    if rc == 0 and pr_state and pr_state != "OPEN":
+        if isinstance(view, dict):
+            pr_state = (view.get("state") or "").strip()
+            live_base = (view.get("baseRefName") or "").strip()
+    # A failed or incomplete lookup says nothing about the PR. Carrying on as if
+    # it were open would rebase, push and merge on stale state, so stop here
+    # before anything mutates it.
+    if not pr_state or not live_base:
+        log(f"Could not read live state of PR #{pr_num} (gh exit {rc}); not touching it")
+        return fail_pr_and_restore_children(
+            sm, index, branch, target,
+            f"gh pr view {pr_num} failed or returned incomplete data; live PR state unknown",
+        )
+    if pr_state != "OPEN":
         # A PR that merged outside this run -- by hand, by an earlier train --
         # still has to feed mergedBranches, or its stacked child is never
         # retargeted and cannot arm auto-merge. A CLOSED PR's branch must not

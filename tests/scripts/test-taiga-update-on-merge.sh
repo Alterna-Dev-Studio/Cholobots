@@ -147,7 +147,7 @@ case "$URL" in
         fi
         if [ "$WRITE_OUT" = "%{http_code}" ]; then echo "200"; fi
         ;;
-    */api/v1/tasks?*)
+    */api/v1/tasks\?*)
         # Task list query
         if [[ -f "$MOCK_DIR_LOCAL/tasks_response.json" ]]; then
             RESPONSE=$(cat "$MOCK_DIR_LOCAL/tasks_response.json")
@@ -162,14 +162,14 @@ case "$URL" in
         if [ "$WRITE_OUT" = "%{http_code}" ]; then echo "200"; fi
         ;;
     */api/v1/tasks/*)
-        # Task PATCH (close task)
+        # Task PATCH (close task); MOCK_TASK_PATCH_HTTP_CODE forces a failure
         RESPONSE='{"id":300,"version":2,"status":62,"status_extra_info":{"name":"S62","is_closed":false}}'
         if [ -n "$OUTPUT_FILE" ]; then
             echo "$RESPONSE" > "$OUTPUT_FILE"
         else
             echo "$RESPONSE"
         fi
-        if [ "$WRITE_OUT" = "%{http_code}" ]; then echo "200"; fi
+        if [ "$WRITE_OUT" = "%{http_code}" ]; then echo "${MOCK_TASK_PATCH_HTTP_CODE:-200}"; fi
         ;;
     *)
         echo "MOCK_ERROR: unexpected URL: $URL" >&2
@@ -538,6 +538,62 @@ test_story_neither_signal() {
         pass "neither: one comment-only PATCH posted"
     else
         fail "neither: expected one 'Merged in PR #522' comment PATCH. Calls: $(cat "$MOCK_DIR/curl_calls.log")"
+    fi
+
+    unset MOCK_USERSTORY_HTTP_CODE
+}
+
+# ============================================================
+# Test: a failed task close fails the sync after every task was tried
+# ============================================================
+test_story_task_close_failure_exits_nonzero() {
+    info "Test: a failed task PATCH makes the script exit nonzero"
+    setup_mock_curl
+    export MOCK_USERSTORY_HTTP_CODE=200
+    write_story 78
+    write_two_open_tasks
+
+    local output rc=0
+    export MOCK_TASK_PATCH_HTTP_CODE=500
+    output=$(PR_LABELS="close-tasks-on-merge" \
+        run_script 689 522 "https://github.com/example/repo/pull/522" 2>&1) || rc=$?
+    unset MOCK_TASK_PATCH_HTTP_CODE
+    if [ "$rc" -ne 0 ]; then
+        pass "task close failure: script exited $rc"
+    else
+        fail "task close failure: expected a nonzero exit. Output: $output"
+    fi
+    if [ "$(task_patches)" -eq 2 ]; then
+        pass "task close failure: every task was still attempted"
+    else
+        fail "task close failure: expected 2 task PATCH attempts, got $(task_patches)"
+    fi
+
+    unset MOCK_USERSTORY_HTTP_CODE
+}
+
+# ============================================================
+# Test: the task status-level is_closed flag decides which tasks are open
+# ============================================================
+test_story_tasks_use_status_level_closed_flag() {
+    info "Test: task status-level is_closed overrides the item-level flag"
+    setup_mock_curl
+    export MOCK_USERSTORY_HTTP_CODE=200
+    write_story 78
+    # 301: item flag says open, status says closed -> skipped.
+    # 302: item flag says closed, status says open -> closed.
+    # 303: no status_extra_info -> falls back to the item flag (open) -> closed.
+    cat > "$MOCK_DIR/tasks_response.json" << 'EOF'
+[{"id":301,"ref":223,"status":62,"version":2,"is_closed":false,"status_extra_info":{"is_closed":true}},{"id":302,"ref":224,"status":59,"version":3,"is_closed":true,"status_extra_info":{"is_closed":false}},{"id":303,"ref":225,"status":59,"version":1,"is_closed":false}]
+EOF
+
+    PR_LABELS="close-tasks-on-merge" assert_story_effects "status-level flag" 0 2
+    if [ "$(count_calls 'PATCH .*/api/v1/tasks/301 ')" -eq 0 ] \
+        && [ "$(count_calls 'PATCH .*/api/v1/tasks/302 ')" -eq 1 ] \
+        && [ "$(count_calls 'PATCH .*/api/v1/tasks/303 ')" -eq 1 ]; then
+        pass "status-level flag: only the genuinely open tasks were PATCHed"
+    else
+        fail "status-level flag: wrong tasks PATCHed. Calls: $(cat "$MOCK_DIR/curl_calls.log")"
     fi
 
     unset MOCK_USERSTORY_HTTP_CODE
@@ -981,6 +1037,8 @@ test_auth_failure_reports_http_code
 test_auth_failure_reports_response_body
 test_lookups_use_project_39
 test_story_neither_signal
+test_story_task_close_failure_exits_nonzero
+test_story_tasks_use_status_level_closed_flag
 test_story_close_tasks_label
 test_story_mark_done_label
 test_story_close_tasks_tag

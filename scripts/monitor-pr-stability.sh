@@ -326,7 +326,7 @@ while true; do
     #     new SHA never inherits an older SHA's expired grace.
     #   No CI configured (zero workflows, no required contexts): an empty
     #     run list is final at once, with a NOTE on stderr. An unreadable
-    #     workflow list keeps the grace behaviour above.
+    #     workflow list stays pending (never STABLE) until it can be read.
     awaiting_registration=false
     if [[ $(echo "$runs_json" | jq 'length') -eq 0 ]]; then
         if [[ "$ci_configured" == "unknown" ]]; then
@@ -346,6 +346,11 @@ while true; do
                 echo "NOTE: no CI checks configured for ${GH_REPO} (0 workflows, no required contexts); treating checks as passed" >&2
                 no_ci_noted=true
             fi
+        elif [[ "$ci_configured" == "unknown" ]]; then
+            # The workflow probe failed (permissions, network), so "no CI" is
+            # unproven. Stay pending, never STABLE; the probe is retried next
+            # poll and --max-seconds bounds the wait with a PENDING verdict.
+            awaiting_registration=true
         elif [[ $(( $(date +%s) - empty_runs_start )) -lt "$RUN_REGISTRATION_GRACE_SECONDS" ]]; then
             awaiting_registration=true
         fi

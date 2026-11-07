@@ -42,6 +42,7 @@ import sys
 # Add shared lib to path
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "lib"))
 from stability_parser import parse_stability_result
+from private_files import write_json_private
 
 
 # -- Exit codes --
@@ -175,10 +176,7 @@ class StateManager:
 
     def _save(self):
         """Save state to disk atomically (write temp + rename)."""
-        tmp = f"{self.state_path}.tmp.{os.getpid()}"
-        with open(tmp, "w") as f:
-            json.dump(self._state, f, indent=2)
-        os.rename(tmp, self.state_path)
+        write_json_private(self.state_path, self._state)
 
 
 def log(msg):
@@ -219,10 +217,7 @@ def write_action_request(action_path, action, pr_number, state_file, details):
         "state_file": state_file,
         "details": details,
     }
-    tmp = f"{action_path}.tmp.{os.getpid()}"
-    with open(tmp, "w") as f:
-        json.dump(data, f, indent=2)
-    os.rename(tmp, action_path)
+    write_json_private(action_path, data)
 
 
 def main():
@@ -272,32 +267,16 @@ def main():
     )
 
     if rc != 0:
+        # monitor-pr-stability.sh reports failing checks on stdout with exit 0
+        # (CHECKS_FAILING:...). A non-zero exit is an API, authentication or
+        # network error, which says nothing about the PR's code: dispatching a
+        # build fix or counting toward escalation would act on an outage.
         log(f"monitor-pr-stability.sh failed (exit {rc}): stdout={stdout[:200]}, stderr={stderr[:200]}")
         sm.update(
+            phase="error",
             lastResult={"status": "error", "stdout": stdout[:500], "stderr": stderr[:500]},
-            buildFailureCount=sm.state["buildFailureCount"] + 1,
         )
-
-        # Check escalation threshold
-        if sm.state["buildFailureCount"] >= sm.state["maxFailures"]:
-            log(f"Build failure count ({sm.state['buildFailureCount']}) reached threshold ({sm.state['maxFailures']}). Escalating.")
-            sm.update(phase="escalated")
-            return EXIT_ESCALATED
-
-        write_action_request(
-            action_path,
-            action="fix_build",
-            pr_number=pr_number,
-            state_file=state_path,
-            details={
-                "failing_checks": ["unknown"],
-                "stdout": stdout[:500],
-                "stderr": stderr[:500],
-            },
-        )
-        sm.update(phase="awaiting_fix")
-        log(f"Action request written to {action_path}")
-        return EXIT_BUILD_FIX
+        return EXIT_ERROR
 
     # Parse the stability result
     result = parse_stability_result(stdout)

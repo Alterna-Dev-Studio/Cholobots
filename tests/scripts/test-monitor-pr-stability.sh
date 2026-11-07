@@ -817,6 +817,9 @@ write_threads_json '[]'
 # final and must not keep the monitor polling forever.
 echo '[]' > "$MOCK_DIR/runs.json"
 echo "feature/some-story-123" > "$MOCK_DIR/base_ref.txt"
+# The repo has workflows (they just do not trigger on this base); a readable
+# probe is what separates this from an unreadable one, which stays pending.
+echo '2' > "$MOCK_DIR/workflow_count.txt"
 output=$(MONITOR_RUN_REGISTRATION_GRACE_SECONDS=1 run_monitor)
 if [[ "$output" == "STABLE" ]]; then
     pass "Empty Mode B run list reaches STABLE after the registration grace"
@@ -913,6 +916,22 @@ echo '2' > "$MOCK_DIR/workflow_count.txt"
 output=$(run_monitor_bounded)
 if [[ "$output" == "PENDING" ]]; then
     pass "Configured CI with no runs yet stays PENDING"
+else
+    fail "Expected PENDING, got: $output"
+fi
+cleanup; MOCK_DIR=""
+
+# --- Test: An unreadable workflow probe never reads as no CI ---
+info "Test: a failing workflow probe with no runs stays PENDING, not STABLE"
+setup_mock_gh
+write_threads_json '[]'
+echo '[]' > "$MOCK_DIR/runs.json"
+# No workflow_count.txt: the mock's workflow probe exits non-zero (unreadable).
+# A zero grace makes the registration window expire at once, so only the
+# unproven-CI rule can keep this pending.
+output=$(MONITOR_RUN_REGISTRATION_GRACE_SECONDS=0 run_monitor_bounded)
+if [[ "$output" == "PENDING" ]]; then
+    pass "Unreadable workflow probe stays PENDING after the grace expires"
 else
     fail "Expected PENDING, got: $output"
 fi

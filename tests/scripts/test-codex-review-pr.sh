@@ -1551,6 +1551,38 @@ wait "$hb_owner_pid"
 set -e
 cleanup; MOCK_DIR=""; REPO_DIR=""
 
+# --- Test: the setup heartbeat stops when its owner is SIGKILLed ---
+# An owner killed hard enough to skip stop_heartbeat used to leave the heartbeat
+# touching the pid-less job dir forever, so joiners saw a live claim and never
+# reclaimed it. The heartbeat now gets the owner's pid and exits once it is gone.
+info "Test: the setup heartbeat exits after its owner is SIGKILLed"
+setup_repo
+setup_mock_gh
+setup_mock_git_fetch_delay 30
+HBK_JOBDIR="$MOCK_DIR/state/pr-42-$CURRENT_HEAD_SHA-false"
+(cd "$REPO_DIR" && PATH="$MOCK_DIR:$PATH" MOCK_DIR="$MOCK_DIR" CODEX_REVIEW_STATE_DIR="$MOCK_DIR/state" \
+    CODEX_REVIEW_JOB_INIT_TIMEOUT_SECONDS=4 CODEX_REVIEW_WAIT_SECONDS=1 timeout "$INVOCATION_TIMEOUT" bash "$SCRIPT" 42 \
+    > "$MOCK_DIR/hbk_out" 2>&1) &
+hbk_wrapper_pid=$!
+hbk_owner=""; hbk_heartbeat=""
+if wait_for "$POLL_DEADLINE" \
+    'read -r hbk_heartbeat hbk_owner < <(ps -eo pid=,args= | awk -v d="$HBK_JOBDIR" '"'"'index($0, "bash -c") > 0 && $NF == d { print $1, $(NF-2); exit }'"'"'); [[ -n "$hbk_owner" ]]'; then
+    kill -9 "$hbk_owner" 2>/dev/null || true
+    # One heartbeat period is 1s (4/4); give it several to notice.
+    if wait_for "$PROC_EXIT_DEADLINE" '! kill -0 "$hbk_heartbeat" 2>/dev/null'; then
+        pass "heartbeat exits once its owner is gone"
+    else
+        fail "Heartbeat $hbk_heartbeat outlived its SIGKILLed owner $hbk_owner"
+        kill -9 "$hbk_heartbeat" 2>/dev/null || true
+    fi
+else
+    fail "Never found the setup heartbeat process for $HBK_JOBDIR"
+fi
+set +e
+wait "$hbk_wrapper_pid"
+set -e
+cleanup; MOCK_DIR=""; REPO_DIR=""
+
 # --- Test: a joiner that cannot read the finished job's result (a sibling
 # joiner consumed and removed the job dir between the -f check and the read)
 # must still emit a contract line rather than exiting 1 as if nothing was

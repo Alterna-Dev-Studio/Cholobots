@@ -23,6 +23,7 @@ from merge_train import (
     discover_epic_prs,
     generate_summary,
     write_action_request,
+    action_path_for,
     write_build_log,
     BUILD_LOG_TAIL_LINES,
     check_taiga_status,
@@ -890,6 +891,28 @@ class TestExtractTaigaRef:
             == 2748
         )
         # Note: extract_taiga_ref matches delimiter-bounded digit sequences, not embedded digits
+
+    def test_conventional_branch_beats_title_and_body_ref(self):
+        """A child story's title may mention its parent; the branch names the story."""
+        assert extract_taiga_ref(
+            "feature/71-child-story", "Follow-up to #70", "Builds on #70"
+        ) == 71
+        assert extract_taiga_ref("fix/12-ping-timezone", "Fixes #3 regression", "") == 12
+
+    def test_title_still_beats_a_loose_branch_number(self):
+        """Only the feature/fix convention is authoritative; a stray number in another branch is not."""
+        assert extract_taiga_ref("release-2026-11", "Ship #42", "") == 42
+
+    def test_story_pr_landed_attributes_by_branch_not_parent_in_title(self, monkeypatch):
+        """A merged child PR whose title cites the parent must not mark the parent landed."""
+        import merge_train
+        payload = _all_prs_payload([
+            (31, "MERGED", "child work, depends on #70", "feature/71-child"),
+        ])
+        fake_cmd, _ = _fake_run_cmd([("pr list --state all", (0, payload, ""))])
+        monkeypatch.setattr("merge_train.run_cmd", fake_cmd)
+        assert merge_train.story_pr_landed(70) is False
+        assert merge_train.story_pr_landed(71) is True
 
 
 class TestPreRebaseStabilityCheck:
@@ -2715,7 +2738,7 @@ class TestBuildFailureCapturesOutput:
         ])
         monkeypatch.setattr("merge_train.run_cmd", fake_cmd)
 
-        action_path = f"/tmp/merge-train-{ts}-action.json"
+        action_path = action_path_for(state_path)
         build_log = f"/tmp/merge-train-{ts}-build-42.log"
         try:
             result = process_pr(sm, 0, "main", state_path)
@@ -3509,3 +3532,111 @@ class TestStatePathIsUnique:
             for p in paths:
                 if os.path.exists(p):
                     os.remove(p)
+
+
+class TestLivePrLookupFailure:
+    """A failed or incomplete live `gh pr view` must stop before anything mutates the PR."""
+
+    def _run(self, monkeypatch, tmp_path, view_result):
+        state_path = str(tmp_path / "state.json")
+        sm = _make_sm_for_process_pr(state_path)
+        fake_cmd, calls = _fake_run_cmd([
+            ("git fetch upstream", (0, "", "")),
+            ("gh pr view 42 --json state,baseRefName", view_result),
+        ])
+        monkeypatch.setattr("merge_train.run_cmd", fake_cmd)
+        result = process_pr(sm, 0, "main", state_path)
+        return sm, result, calls
+
+    def _assert_untouched(self, sm, result, calls):
+        assert result == EXIT_OK
+        assert sm.state["prs"][0]["status"] == "failed"
+        assert "live PR state unknown" in sm.state["prs"][0]["error"]
+        assert sm.state["currentIndex"] == 1
+        joined = "\n".join(calls)
+        for mutating in ("git rebase", "git push", "gh pr merge", "monitor-pr-stability.sh"):
+            assert mutating not in joined
+
+    def test_nonzero_exit_fails_the_pr(self, monkeypatch, tmp_path):
+        self._assert_untouched(*self._run(monkeypatch, tmp_path, (1, "", "HTTP 502")))
+
+    def test_malformed_json_fails_the_pr(self, monkeypatch, tmp_path):
+        self._assert_untouched(*self._run(monkeypatch, tmp_path, (0, "<html>", "")))
+
+    def test_missing_state_fails_the_pr(self, monkeypatch, tmp_path):
+        self._assert_untouched(*self._run(monkeypatch, tmp_path, (0, "{}", "")))
+
+    def test_missing_base_fails_the_pr(self, monkeypatch, tmp_path):
+        self._assert_untouched(*self._run(monkeypatch, tmp_path, (0, '{"state": "OPEN"}', "")))
+
+
+class TestStoryPrLandedTruncation:
+    def test_full_page_listing_raises_instead_of_reporting_unlanded(self, monkeypatch):
+        import merge_train
+        entries = [(n, "OPEN", f"feat (#{n})", f"feature/x-{n}") for n in range(1, merge_train.PARENT_PR_LIST_LIMIT + 1)]
+        fake_cmd, _ = _fake_run_cmd([("pr list --state all", (0, _all_prs_payload(entries), ""))])
+        monkeypatch.setattr("merge_train.run_cmd", fake_cmd)
+        with pytest.raises(RuntimeError, match="limit"):
+            merge_train.story_pr_landed(7)
+
+    def test_unlanded_parents_is_none_when_the_listing_is_truncated(self, monkeypatch):
+        """None is the caller's 'could not verify' answer, not a misleading 'parent not merged'."""
+        import merge_train
+        entries = [(n, "OPEN", f"feat (#{n})", f"feature/x-{n}") for n in range(1, merge_train.PARENT_PR_LIST_LIMIT + 1)]
+        fake_cmd, _ = _fake_run_cmd([
+            ("--epic", (0, _epic_json(INTEGRATION_EPIC_DESCRIPTION), "")),
+            ("pr list --state all", (0, _all_prs_payload(entries), "")),
+        ])
+        monkeypatch.setattr("merge_train.run_cmd", fake_cmd)
+        assert merge_train.unlanded_integration_parents("epic/2004-integration-2748") is None
+
+
+class TestActionPathIsPerTrain:
+    def test_action_path_derives_from_the_unique_state_file(self):
+        from merge_train import action_path_for
+        assert action_path_for("/tmp/merge-train-1700000000-ab12cd.json") == "/tmp/merge-train-1700000000-ab12cd-action.json"
+        assert action_path_for("/tmp/merge-train-1700000000-ab12cd.json") != action_path_for("/tmp/merge-train-1700000000-zz99yy.json")
+
+    def test_process_pr_writes_to_the_derived_path(self, monkeypatch, tmp_path):
+        """Two trains in the same second no longer share /tmp/merge-train-<ts>-action.json."""
+        from merge_train import action_path_for
+        monkeypatch.setattr("merge_train.time.time", lambda: 1700000000)
+        written = []
+        monkeypatch.setattr("merge_train.write_action_request", lambda path, **kw: written.append(path))
+        state_path = str(tmp_path / "train-a.json")
+        sm = _make_sm_for_process_pr(state_path)
+        fake_cmd, _ = _fake_run_cmd([
+            ("git fetch upstream", (0, "", "")),
+            _pr_view_response("OPEN"),
+            _taiga_done_response(),
+            ("monitor-pr-stability.sh", (0, "CHECKS_FAILING:build", "")),
+        ])
+        monkeypatch.setattr("merge_train.run_cmd", fake_cmd)
+        process_pr(sm, 0, "main", state_path)
+        assert written == [action_path_for(state_path)]
+
+
+class TestStateFilesStayPrivate:
+    def test_state_manager_save_keeps_0600_under_a_permissive_umask(self, tmp_path):
+        state_path = str(tmp_path / "state.json")
+        old = os.umask(0o000)
+        try:
+            sm = StateManager(state_path)
+            sm.init([{"number": 1, "title": "t", "branch": "feature/a-1", "body": ""}], target="main")
+            sm.update_pr(0, status="in_progress")
+        finally:
+            os.umask(old)
+        assert os.stat(state_path).st_mode & 0o777 == 0o600
+
+    def test_action_request_is_0600_under_a_permissive_umask(self, tmp_path):
+        path = str(tmp_path / "action.json")
+        old = os.umask(0o000)
+        try:
+            write_action_request(path, "resolve_comments",
+                                 {"number": 1, "branch": "b", "title": "t"}, "/tmp/s.json", {})
+        finally:
+            os.umask(old)
+        assert os.stat(path).st_mode & 0o777 == 0o600
+        assert json.load(open(path))["action"] == "resolve_comments"
+        assert [f for f in os.listdir(tmp_path) if ".tmp." in f] == []
+
