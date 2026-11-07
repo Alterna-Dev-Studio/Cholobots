@@ -32,12 +32,14 @@ identity, installing `sops` and `direnv`, and hooking direnv into Bash. Then cre
 above in this checkout and run `direnv allow`.
 
 `taiga_project_setup.py --apply` changes project settings, which the agent account cannot do. Jon
-stores his admin account once in a second scope, typing each value at a hidden prompt:
+stores his admin account once in a second scope, typing each value at a hidden prompt. `dv` is the
+vault's own command; a shell that has loaded the `jon-dev-env` profile has it on `PATH`, and
+`$DEV_ENV_HOME/scripts/envtool` is the same tool for a script that runs without that profile:
 
 ```bash
-~/work/utils/jon-dev-env/scripts/envtool set project/growthgarage-admin TAIGA_API_URL   # https://backlog.growthgarage.org
-~/work/utils/jon-dev-env/scripts/envtool set project/growthgarage-admin TAIGA_USERNAME  # jonroberts
-~/work/utils/jon-dev-env/scripts/envtool set project/growthgarage-admin TAIGA_PASSWORD
+dv set project/growthgarage-admin TAIGA_API_URL   # https://backlog.growthgarage.org
+dv set project/growthgarage-admin TAIGA_USERNAME  # jonroberts
+dv set project/growthgarage-admin TAIGA_PASSWORD
 ```
 
 The dry run and `--check` work with the agent account. The apply loads the admin scope into a
@@ -45,12 +47,12 @@ subshell, so the admin password stays out of the interactive shell:
 
 ```bash
 python3 scripts/taiga_project_setup.py
-(eval "$(~/work/utils/jon-dev-env/scripts/envtool export project/growthgarage-admin)" && python3 scripts/taiga_project_setup.py --apply)
+(eval "$(dv export project/growthgarage-admin)" && python3 scripts/taiga_project_setup.py --apply)
 python3 scripts/taiga_project_setup.py --check
 ```
 
 The dry run and the apply print the account they logged in as. If the apply reports
-`slave1-codex`, the admin scope is missing or incomplete, because `envtool export` prints nothing
+`slave1-codex`, the admin scope is missing or incomplete, because `dv export` prints nothing
 for a scope that does not exist.
 
 ## Taiga
