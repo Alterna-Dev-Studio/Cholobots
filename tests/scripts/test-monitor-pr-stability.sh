@@ -1013,6 +1013,18 @@ else
     fail "Expected 'ABORTED at line ...: false' on stderr, got: $trap_output"
 fi
 
+# --- Test: --poll-interval 0 is rejected (would busy-loop on `sleep 0`) ---
+info "Test: --poll-interval 0 is rejected as non-positive"
+setup_mock_gh
+rc=0
+err=$(PATH="$MOCK_DIR:$PATH" MOCK_DIR="$MOCK_DIR" timeout "$MONITOR_TEST_TIMEOUT" bash "$MONITOR_SCRIPT" 42 0 --poll-interval 0 2>&1) || rc=$?
+if [[ "$rc" -eq 1 && "$err" == *"--poll-interval requires a positive integer"* ]]; then
+    pass "--poll-interval 0 exits 1 with the positive-integer error"
+else
+    fail "Expected exit 1 and a positive-integer error, got rc=$rc: $err"
+fi
+cleanup; MOCK_DIR=""
+
 # --- Summary ---
 echo ""
 if [[ "$FAILURES" -eq 0 ]]; then

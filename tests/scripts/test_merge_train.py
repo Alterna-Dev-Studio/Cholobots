@@ -1218,6 +1218,97 @@ class TestAncestryCheckSkipsRebase:
         assert "git push --force-with-lease" in cmd_str
 
 
+class TestMonitorInfrastructureError:
+    """monitor-pr-stability.sh exiting nonzero is a monitor failure, not a build verdict."""
+
+    @staticmethod
+    def _responses(monitor_results, diff_check=(0, "", ""), is_ancestor_rc=1):
+        return [
+            ("git fetch upstream", (0, "", "")),
+            _pr_view_response("OPEN"),
+            ("gh pr view 42 --json state -q .state", (0, "MERGED", "")),
+            ("--json baseRefName", (0, "main", "")),
+            ("monitor-pr-stability.sh", monitor_results),
+            ("git checkout feature/foo-42", (0, "", "")),
+            ("git reset --hard upstream/", (0, "", "")),
+            ("git merge-base --is-ancestor", (is_ancestor_rc, "", "")),
+            ("git rev-parse HEAD", (0, "abc123", "")),
+            ("git rebase upstream/main", (0, "", "")),
+            ("git diff --check", diff_check),
+            ("python -m py_compile", (0, "", "")),
+            ("git push --force-with-lease", (0, "", "")),
+            _taiga_done_response(),
+            ("gh pr merge", (0, "", "")),
+            ("git checkout main", (0, "", "")),
+            ("git pull upstream main", (0, "", "")),
+        ]
+
+    def test_pre_rebase_monitor_error_is_not_a_build_failure(self, monkeypatch, tmp_path):
+        state_path = str(tmp_path / "state.json")
+        sm = _make_sm_for_process_pr(state_path)
+        fake_cmd, calls = _fake_run_cmd(self._responses([(1, "ERROR:gh run list failed: HTTP 502", "")]))
+        monkeypatch.setattr("merge_train.run_cmd", fake_cmd)
+
+        result = process_pr(sm, 0, "main", state_path)
+
+        assert result == EXIT_ERROR
+        pr = sm.state["prs"][0]
+        assert pr["status"] == "in_progress"
+        assert "HTTP 502" in pr["error"]
+        assert sm.state["currentIndex"] == 0
+        assert not os.path.exists(action_path_for(state_path))
+        assert not any("git rebase" in c for c in calls)
+
+    def test_post_rebase_monitor_error_does_not_fail_or_advance(self, monkeypatch, tmp_path):
+        state_path = str(tmp_path / "state.json")
+        sm = _make_sm_for_process_pr(state_path)
+        fake_cmd, calls = _fake_run_cmd(self._responses([
+            (0, "STABLE", ""),
+            (1, "ERROR:GraphQL query failed: HTTP 401", ""),
+        ]))
+        monkeypatch.setattr("merge_train.run_cmd", fake_cmd)
+
+        result = process_pr(sm, 0, "main", state_path)
+
+        assert result == EXIT_ERROR
+        pr = sm.state["prs"][0]
+        assert pr["status"] == "in_progress"
+        assert "post-rebase" in pr["error"] and "HTTP 401" in pr["error"]
+        assert sm.state["currentIndex"] == 0
+        assert not any("gh pr merge" in c for c in calls)
+
+
+class TestPostRebaseWhitespaceCheck:
+    """git diff --check reports whitespace errors too; only conflict markers fail a rebase."""
+
+    @staticmethod
+    def _run(monkeypatch, tmp_path, diff_check):
+        state_path = str(tmp_path / "state.json")
+        sm = _make_sm_for_process_pr(state_path)
+        fake_cmd, calls = _fake_run_cmd(TestMonitorInfrastructureError._responses(
+            [(0, "STABLE", "")], diff_check=diff_check))
+        monkeypatch.setattr("merge_train.run_cmd", fake_cmd)
+        process_pr(sm, 0, "main", state_path)
+        return sm, calls
+
+    def test_whitespace_warning_does_not_fail_the_rebase(self, monkeypatch, tmp_path):
+        sm, calls = self._run(monkeypatch, tmp_path, (2, "bots/x.py:3: trailing whitespace.\n+x = 1 ", ""))
+        assert sm.state["prs"][0]["status"] != "failed"
+        assert any("git push --force-with-lease" in c for c in calls)
+
+    def test_leftover_conflict_marker_fails_the_rebase(self, monkeypatch, tmp_path):
+        sm, calls = self._run(monkeypatch, tmp_path, (2, "bots/x.py:3: leftover conflict marker\n+<<<<<<< HEAD", ""))
+        pr = sm.state["prs"][0]
+        assert pr["status"] == "failed"
+        assert pr["error"] == "conflict markers remain after rebase"
+        assert not any("git push --force-with-lease" in c for c in calls)
+        assert any(c.startswith("git reset --hard abc123") for c in calls)
+
+    def test_diff_check_runs_with_the_c_locale(self, monkeypatch, tmp_path):
+        _, calls = self._run(monkeypatch, tmp_path, (0, "", ""))
+        assert any(c.startswith("env LC_ALL=C git diff --check") for c in calls)
+
+
 class TestContainedIntegrationBranchClosed:
     """An integration branch whose tree is already identical to the target
     carries no remaining diff once every parent it merged has landed -- the

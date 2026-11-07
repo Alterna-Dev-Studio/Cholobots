@@ -1160,6 +1160,22 @@ def fail_pr_and_restore_children(sm, index, branch, target, error, status="faile
     return EXIT_OK
 
 
+def monitor_infrastructure_error(sm, index, pr_num, phase, stdout, stderr):
+    """Handle monitor-pr-stability.sh exiting nonzero (auth, network, bad JSON).
+
+    That is a failure of the monitor, not a verdict on the PR's build, so the PR
+    is neither failed nor sent to remediation, and the train does not advance.
+    It stays in_progress with the error recorded and the train stops with
+    EXIT_ERROR; the merge-train skill retries a transient one with --resume,
+    which re-enters this PR.
+    """
+    # The monitor prints "ERROR:..." on stdout, so stderr alone is usually empty.
+    detail = " ".join(part for part in (stdout, stderr) if part)[:200]
+    log(f"CI monitoring ({phase}) failed for PR #{pr_num}: {detail}")
+    sm.update_pr(index, status="in_progress", error=f"CI monitoring failed ({phase}): {detail}")
+    return EXIT_ERROR
+
+
 def process_pr(sm, index, target, state_path):
     """Process a single PR: Taiga gate, pre-rebase CI check, rebase, force-push, CI, merge.
 
@@ -1408,23 +1424,7 @@ def process_pr(sm, index, target, state_path):
         check=False,
     )
     if rc != 0:
-        log(f"Pre-rebase stability check failed for PR #{pr_num}: {stderr}")
-        # Write action-request for remediation
-        write_action_request(
-            action_path,
-            action="remediate_build",
-            pr=pr,
-            state_file=state_path,
-            details={
-                "failure_type": "ci_pre_rebase",
-                "failing_checks": ["unknown"],
-                "stderr": stderr[:500],
-            },
-        )
-        sm.update_pr(index, status="in_progress", error="pre-rebase CI check failed")
-        sm._save()
-        log(f"Action request written to {action_path}")
-        return EXIT_REMEDIATION
+        return monitor_infrastructure_error(sm, index, pr_num, "pre-rebase", stdout, stderr)
 
     stability = parse_stability_result(stdout)
     if stability["status"] == "checks_failing":
@@ -1568,10 +1568,13 @@ def process_pr(sm, index, target, state_path):
         # (<<<<<<<, =======, >>>>>>>) in the PR diff.  Unlike `git grep '<<<<<<<'`,
         # this ignores binary files, unrelated tracked files, and string literals
         # that happen to contain the marker characters.
+        # --check also reports whitespace errors (trailing whitespace, space
+        # before tab), which must not read as a failed rebase: only the
+        # "leftover conflict marker" lines count. LC_ALL=C pins git's wording.
         rc, markers, _ = run_cmd(
-            f"git diff --check {_q(f'{REMOTE}/{target}')}...HEAD", check=False
+            f"env LC_ALL=C git diff --check {_q(f'{REMOTE}/{target}')}...HEAD", check=False
         )
-        if rc != 0 and markers:
+        if rc != 0 and "leftover conflict marker" in markers:
             log(f"Conflict markers found:\n{markers}")
             run_cmd(f"git reset --hard {_q(pre_rebase_ref)}", check=False)
             sm.update_pr(index, status="failed", error="conflict markers remain after rebase")
@@ -1618,9 +1621,7 @@ def process_pr(sm, index, target, state_path):
             check=False,
         )
         if rc != 0:
-            sm.update_pr(index, status="failed", error=f"CI monitoring failed: {stderr[:200]}")
-            sm.advance()
-            return EXIT_OK
+            return monitor_infrastructure_error(sm, index, pr_num, "post-rebase", stdout, stderr)
 
         stability = parse_stability_result(stdout)
         if stability["status"] == "checks_failing":

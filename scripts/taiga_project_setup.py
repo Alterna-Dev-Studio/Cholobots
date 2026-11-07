@@ -274,9 +274,12 @@ def plan_ordered(plan: Plan, label: str, path: str, targets: Sequence[Target], e
     for target in present:
         item = by_name[target.name.lower()]
         if target.is_closed is not None and item.get("is_closed") != target.is_closed:
-            plan.warnings.append(
-                f"{label} '{item['name']}' has is_closed={item.get('is_closed')}, expected {target.is_closed}; "
-                "left unchanged, fix it in the Taiga admin"
+            # Counted as missing so --check (the pipeline prerequisite) exits 2:
+            # a "Done" status that is not closed makes the Taiga gates skip PRs.
+            # --apply never rewrites is_closed, so this one is fixed in the admin.
+            plan.missing.append(
+                f"{label} '{item['name']}' is_closed={item.get('is_closed')}, expected {target.is_closed} "
+                "(--apply does not change it; fix it in the Taiga admin)"
             )
 
     # Renumber to 1..n whenever something is inserted or the relative order is wrong.

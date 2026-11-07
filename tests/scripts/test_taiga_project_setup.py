@@ -217,6 +217,19 @@ class TestCheck:
         assert code == 0
         assert "is complete" in out
 
+    def test_check_exits_2_when_a_closed_status_is_flagged_open(self):
+        fake = FakeTaiga()
+        run(["--apply"], fake)
+        done = next(i for i in fake.story_statuses if i["name"] == "Done")
+        done["is_closed"] = False
+        code, out, _ = run(["--check"], fake)
+        assert code == 2
+        assert "story status 'Done' is_closed=False, expected True" in out
+        # --apply must still never rewrite is_closed.
+        fake.calls.clear()
+        run(["--apply"], fake)
+        assert fake.writes == []
+
     def test_check_and_apply_are_exclusive(self):
         with pytest.raises(SystemExit):
             setup.parse_args(["--check", "--apply"])

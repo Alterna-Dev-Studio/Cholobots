@@ -54,7 +54,7 @@ shift 2
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --poll-interval)
-            if [[ $# -lt 2 ]] || ! [[ "$2" =~ ^[0-9]+$ ]]; then
+            if [[ $# -lt 2 ]] || ! [[ "$2" =~ ^[1-9][0-9]*$ ]]; then
                 echo "Error: --poll-interval requires a positive integer value" >&2
                 usage
             fi
