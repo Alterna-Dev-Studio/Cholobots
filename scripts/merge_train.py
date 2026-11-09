@@ -1866,11 +1866,14 @@ def process_pr(sm, index, target, state_path):
         # .github/workflows/taiga-sync.yml, the post-merge Taiga sync. Push the
         # fetched upstream main, not the local branch, and never force: a fork
         # that has diverged must fail here rather than be overwritten. A failure
-        # never stops the train, but the sync then waits for a manual push.
-        run_cmd(f"git fetch {REMOTE} main", check=False)
-        rc, _, stderr = run_cmd(
-            f"git push origin refs/remotes/{REMOTE}/main:refs/heads/main", check=False
-        )
+        # never stops the train, but the sync then waits for a manual push. A
+        # failed fetch skips the push: a stale upstream ref could push without
+        # this merge and look like success.
+        rc, _, stderr = run_cmd(f"git fetch {REMOTE} main", check=False)
+        if rc == 0:
+            rc, _, stderr = run_cmd(
+                f"git push origin refs/remotes/{REMOTE}/main:refs/heads/main", check=False
+            )
         if rc != 0:
             log(
                 "WARNING: fork fast-forward failed; the Taiga sync on "

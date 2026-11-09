@@ -3531,6 +3531,20 @@ class TestForkFastForward:
         assert "git fetch upstream && git push origin upstream/main:main" in err
         assert "non-fast-forward" in err
 
+    def test_failed_upstream_fetch_skips_the_push_and_warns(self, monkeypatch, tmp_path, capsys):
+        # A stale refs/remotes/upstream/main could push "successfully" without the
+        # merge, so the sync would silently miss it.
+        result, calls = self._run(
+            monkeypatch, tmp_path,
+            [("git fetch upstream main", (128, "", "fatal: unable to access upstream"))],
+        )
+        assert result == EXIT_OK
+        assert self.FORK_PUSH not in calls
+        err = capsys.readouterr().err
+        assert "WARNING: fork fast-forward failed" in err
+        assert "git fetch upstream && git push origin upstream/main:main" in err
+        assert "unable to access upstream" in err
+
     def test_fork_fast_forward_never_forces(self, monkeypatch, tmp_path):
         _, calls = self._run(monkeypatch, tmp_path)
         pushes = [c for c in calls if c.startswith("git push")]
