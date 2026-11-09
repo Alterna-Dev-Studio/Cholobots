@@ -77,7 +77,14 @@ expect_line "if: github.repository == 'Alterna-Dev-Studio/Cholobots'" "job is gu
 expect_line "runs-on: [self-hosted, Linux, X64, small]" "runs on the homelab self-hosted runners"
 expect_line "TAIGA_SYNC_MIN_UPSTREAM_PR: 8" "PR floor TAIGA_SYNC_MIN_UPSTREAM_PR is 8"
 expect_line "contents: read" "permissions are contents: read"
-expect_line "cancel-in-progress: false" "concurrent pushes queue instead of cancelling"
+# A concurrency group keeps only one pending run and cancels the older pending
+# one, even with cancel-in-progress: false; each run covers only its own push
+# range, so the cancelled push's PRs would never be synced.
+if grep -qE '^[[:space:]]*concurrency:' <<< "$BODY"; then
+    fail "taiga-sync.yml has no concurrency group (a cancelled pending run loses its push range)"
+else
+    pass "taiga-sync.yml has no concurrency group (a cancelled pending run loses its push range)"
+fi
 expect_line "fetch-depth: 0" "checkout has full history for the push range"
 
 # A script the workflow calls but never checks out only fails at runtime, on
@@ -157,7 +164,7 @@ assert job["if"] == "github.repository == 'Alterna-Dev-Studio/Cholobots'", job["
 assert job["runs-on"] == ["self-hosted", "Linux", "X64", "small"], job["runs-on"]
 assert str(job["env"]["TAIGA_SYNC_MIN_UPSTREAM_PR"]) == "8"
 assert doc["permissions"] == {"contents": "read"}, doc["permissions"]
-assert doc["concurrency"]["cancel-in-progress"] is False
+assert "concurrency" not in doc and "concurrency" not in job
 PY
     then
         pass "YAML parses and has the expected trigger, guard, runner, floor and permissions"

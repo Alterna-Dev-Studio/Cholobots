@@ -21,9 +21,10 @@ on:
 permissions:
   contents: read
 
-concurrency:
-  group: taiga-sync
-  cancel-in-progress: false
+# No concurrency group: GitHub keeps only one pending run per group and cancels
+# the older pending one, and each run syncs only its own push range, so that
+# push's PRs would be lost. Ranges of separate pushes are disjoint, and
+# --skip-if-synced covers a replayed PR.
 
 jobs:
   update-taiga:
