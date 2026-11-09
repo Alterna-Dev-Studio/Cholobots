@@ -213,15 +213,16 @@ def find_dependency_cycle(deps_map):
     return None
 
 
-def resolve_out_of_run_dependencies(deps_map, eligible_refs, done_refs):
+def resolve_out_of_run_dependencies(deps_map, eligible_refs, satisfied_refs):
     """Split a run's dependencies into resolved in-run deps and blocked stories.
 
     ``deps_map`` maps ref -> [dep refs], as returned by
     ``parse_dependency_diagram``. It may include refs outside this run, and may
     omit eligible refs that have no dependencies. ``eligible_refs`` is the run's
-    eligible story list. ``done_refs`` are the refs verified Done (merged) in
-    Taiga -- only those out-of-run deps are safe to drop, because only a merged
-    prerequisite's changes are already in the base branch.
+    eligible story list. ``satisfied_refs`` are the out-of-run refs whose work
+    is already in the run's base branch: Done in Taiga, or merged into the base
+    with no open PR still claiming them (``dependency_satisfaction.py``). Only
+    those out-of-run deps are safe to drop.
 
     Returns ``(run_deps, excluded)``:
 
@@ -230,16 +231,16 @@ def resolve_out_of_run_dependencies(deps_map, eligible_refs, done_refs):
         excluded, with an empty list when it has none. Diagram order preserved.
     ``excluded``
         ``{ref: blocking_ref}`` for each eligible story that cannot run. The
-        blocking ref is an out-of-run prerequisite that is not Done, or an
+        blocking ref is an out-of-run prerequisite that is not satisfied, or an
         excluded in-run story it depends on (transitively).
     """
     eligible = set(eligible_refs)
-    done = set(done_refs)
+    satisfied = set(satisfied_refs)
     excluded = {}
 
     for ref in eligible:
         for dep in deps_map.get(ref, []):
-            if dep not in eligible and dep not in done:
+            if dep not in eligible and dep not in satisfied:
                 excluded[ref] = dep
                 break
 

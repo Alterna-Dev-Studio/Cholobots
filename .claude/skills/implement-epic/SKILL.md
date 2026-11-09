@@ -140,24 +140,49 @@ print(json.dumps(find_dependency_cycle(deps)))
 A non-`null` result is a cycle: report `ERROR: Circular dependency: #a -> #b -> #a` and stop
 without creating any worktree. Fix the epic's diagram and re-invoke.
 
-#### Step 2a-bis: resolve out-of-run dependencies by Done status
+#### Step 2a-bis: resolve out-of-run dependencies: Done, or merged into the base
 
 Collect the **out-of-run refs**: every dep in the Step 2a map, for an eligible story, whose ref is
-not in the eligible story list. For each one, `get_story(project=39, ref=<dep-ref>)` (or
-`scripts/taiga-story.sh <dep-ref> 39`) and add it to `done_refs` **only if its status is `Done`**.
-Do **not** use `is_closed`: `Archived` is also closed and is not a merge. A lookup that fails, or
-returns exit 44, counts as not Done.
+not in the eligible story list. Classify them all in one call, with the run's `baseBranch`
+(Step 2c):
 
-Then call `resolve_out_of_run_dependencies(deps, eligible_refs, done_refs)` from
+```bash
+python3 scripts/lib/dependency_satisfaction.py --base <baseBranch> <out-of-run refs...> \
+  > /tmp/epic-<epic-ref>/out-of-run.json
+```
+
+An out-of-run dependency is **satisfied** when its code is already in the base branch:
+
+1. its story is `Done`; or
+2. at least one **merged** PR into `<baseBranch>` claims the ref **and** no **open** PR (into any
+   base) still claims it. A story shipped through several PRs is not satisfied until the last one
+   merges. "Claims" is `scripts/taiga_closing_refs.py`, the parser `taiga-sync.yml` runs: a
+   `#<ref>:` title prefix, a `fix(#<ref>):` scope, a standalone `Fixes #<ref>` body line, or a
+   `feature/<ref>-`/`fix/<ref>-` branch. A bare `#<ref>` mention never counts.
+
+It is **never** satisfied when the story is `Archived` or not found, or when a lookup fails
+(`taiga-story.sh` or `gh pr list`); the `reason` field says which. The helper reads PRs with
+`env -u GH_TOKEN gh pr list --repo MrsBohemian/Cholobots --state all` once per run, and treats a
+list that reaches its limit as a failure rather than trusting a truncated page.
+
+The output is `{"satisfied_refs": [...], "dependencies": {"<ref>": {...}}}`. Each dependency
+carries `satisfied`, `via` (`done`, `merged` or `null`), `reason`, `status`, `merged_prs`,
+`open_prs`, and, for the merged path, `gated_tasks` (open tasks with a `## Gate` section: post-merge
+checks waiting on Jon or Heaven; `gated_tasks_error` when they could not be read). Gated tasks never
+block a dependent; they only go in the report. If the command itself fails, treat every out-of-run
+dependency as not satisfied and record the error as the reason.
+
+Then call `resolve_out_of_run_dependencies(deps, eligible_refs, satisfied_refs)` from
 `scripts/lib/dependency_parser.py`, using the same `sys.path.insert(0, 'scripts/lib')` preamble as
 the cycle check. Use its `run_deps` from here on. Remove every `excluded` ref from the story list
-and record `ref -> blocking_ref` for the Step 5 report. If no stories remain, report the exclusions
-and stop.
+and record `ref -> blocking_ref` plus the blocking dependency's `reason` for the Step 5 report. If
+no stories remain, report the exclusions and stop.
 
-An out-of-run dependency is dropped **only** when it is Done, i.e. merged — its work is already in
-the base branch. An unfinished prerequisite (In progress, Blocked, Ready for review, Ready for test,
-not yet analyzed, Archived) keeps the dependent **out of this run**, because running it would cut
-its branch from a base that lacks the prerequisite's work.
+A satisfied out-of-run dependency is dropped from `run_deps`, so a story whose only prerequisites
+are satisfied has no in-run dependencies and is cut from `baseBranch`, which already contains the
+prerequisite's merged work (Step 2c). An unsatisfied prerequisite (not merged, a PR still open,
+Archived, or unknown because a lookup failed) keeps the dependent **out of this run**, because
+running it would cut its branch from a base that lacks the prerequisite's work.
 
 ### Step 2b: Write stories-input.json
 
@@ -177,7 +202,9 @@ This file is the run's input record; on a resume, Step 1 reconciles the state fi
 ### Step 2c: `baseBranch` is the run's root base, not every story's base
 
 `baseBranch` (default `main`, honouring `$BASE_BRANCH`) is the **run's root base** — the base only
-for stories with no dependencies. A story with one dependency is cut from that dependency's branch,
+for stories with no dependencies, including stories whose only prerequisites were out-of-run
+dependencies satisfied in Step 2a-bis (Done, or merged into `baseBranch`, so their work is already
+there). A story with one dependency is cut from that dependency's branch,
 so it sees the dependency's work; a story with two or more is cut from its integration branch
 (Step 4a). Every branch lives on `upstream` (`MrsBohemian/Cholobots`), so a stacked PR's base is
 always a branch in the same repo.
@@ -410,8 +437,13 @@ uncommitted work and it is the evidence for whoever picks the story up.
    `select_base_branch`** (or `integration`), branch, PR URL
    (`https://github.com/MrsBohemian/Cholobots/pull/<n>`), note — followed by the excluded stories
    (each with the unfinished prerequisite that blocked it), the failures with reasons and their kept
-   worktree paths, the dropped out-of-run dependencies (Done prerequisites only), and the reminder
-   that nothing was merged. `handed_off` stories had CI unverified at agent exit — the merge train
+   worktree paths, the dropped out-of-run dependencies, and the reminder that nothing was merged.
+   List the dropped dependencies from `/tmp/epic-<epic-ref>/out-of-run.json` in two groups: those
+   satisfied as `Done`, and those satisfied through the **merged-PR path** (`via: merged`), each
+   with its status, its merged PR number(s) and its open gated tasks (`#<task-ref> <subject>`, or
+   the `gated_tasks_error`). The merged-PR group tells Jon which stories still have human steps
+   waiting; they block nothing. Each excluded story names the dependency that blocked it and that
+   dependency's `reason`. `handed_off` stories had CI unverified at agent exit — the merge train
    re-validates before merging. Until story #35 adds CI, every PR reports "no checks configured".
 
 ## Event vocabulary
