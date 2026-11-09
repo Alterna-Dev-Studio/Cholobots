@@ -277,7 +277,7 @@ Store `attempts` in the record, set `phase = "complete"`, and go to Step 5.
    - Stories with a non-null `designDocEdited`: list the refs and file paths, and note these design docs have uncommitted Open-Questions resolutions in the working tree that still need to be committed
    - Dependency diagram (from the state file's `diagram` record):
      - `written` or `unchanged`: print the `diagram` text in a fenced code block
-     - `written`: epic <epic-ref>'s `## Dependency Diagram` now has the added edges (list them as `#a depends on #b`), any soft orderings, and the out-of-epic roots (`[outside epic]`); note that /implement-epic Step 2a-bis resolves those roots by Done status and that merge-train epic mode then queues that ref's open PR
+     - `written`: epic <epic-ref>'s `## Dependency Diagram` now has the added edges (list them as `#a depends on #b`), any soft orderings, and the out-of-epic roots (`[outside epic]`); note that /implement-epic Step 2a-bis treats those roots as satisfied once they are Done or merged into the base branch with no open claiming PR, and that merge-train epic mode then queues that ref's open PR
      - `unchanged`: the diagram already held every reported edge; nothing was patched
      - `invalid`: the validator rejected the merge and nothing was written; list the errors so Jon can fix the reported dependencies or the diagram by hand (the run itself did not fail)
      - `failed`: the patch kept conflicting or errored after 3 attempts, or the cross-check failed; give the reason
