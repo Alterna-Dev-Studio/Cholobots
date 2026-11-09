@@ -67,7 +67,8 @@ for a scope that does not exist.
 | `taiga-wiki.sh get\|patch <slug\|page-id> ...` | Read a wiki page into a `/tmp` file or PATCH it from a file; exit 3 on a version conflict |
 | `taiga_select_issues.py --purpose triage\|analyze\|fix\|sprint ...` | Read-only issue selector; prints JSON (`selected`, `urgent`, `skippedRefs`) |
 | `taiga_audit.py [--out-dir D] [--roadmap F]` | Milestone and epic-link audit; writes `output/taiga-audit/report.{json,md}` and a manifest template |
-| `[PR_LABELS="..."] taiga-update-on-merge.sh <ref> <pr> <url>` | Post-merge sync run by `.github/workflows/taiga-sync.yml` (story Done 80, issue Closed 74, task Closed 62), gated on the `mark-done-on-merge` / `close-tasks-on-merge` label or tag |
+| `[PR_LABELS="..."] taiga-update-on-merge.sh [--skip-if-synced] <ref> <pr> <url>` | Post-merge sync for one ref (story Done 80, issue Closed 74, task Closed 62), gated on the `mark-done-on-merge` / `close-tasks-on-merge` label or tag. `--skip-if-synced` exits without changes when the item already has a `Merged in PR #N (` or `Closed by PR #N (` comment. Driven by `taiga_sync_from_push.py` in the fork's `.github/workflows/taiga-sync.yml` |
+| `taiga_sync_from_push.py [--before SHA] [--after SHA] [--dry-run]` | The fork workflow's driver: resolves each commit pushed to the fork's `main` to its merged upstream PR, skips PRs below `TAIGA_SYNC_MIN_UPSTREAM_PR` (default 8), unmerged or not based on `main`, and runs `taiga-update-on-merge.sh --skip-if-synced` once per claimed ref with the PR's labels. Needs `GITHUB_TOKEN` and `TAIGA_*`; exit 1 when any update failed |
 | `taiga_closing_refs.py` | The refs a merged PR claims (title prefix, `fix(#N)`, `Fixes #N` line, `feature/`/`fix/` branch suffix) |
 | `taiga_find_duplicate_tasks.py`, `taiga_strip_duplicated_description.py`, `taiga_html_to_markdown.py` | Cleanup tools for agent-created tasks and descriptions |
 

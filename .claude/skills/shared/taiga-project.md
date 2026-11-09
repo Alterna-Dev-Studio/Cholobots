@@ -219,7 +219,8 @@ exports them through direnv from the SOPS vault). Default project is 39.
 | `scripts/taiga-wiki.sh get\|patch <slug\|page-id> ...` | Wiki page body via a file; a slug resolves in project 39 |
 | `scripts/taiga_select_issues.py --purpose triage\|analyze\|fix\|sprint ...` | Bug selection (`.claude/skills/shared/bug-sweep-options.md`) |
 | `scripts/taiga_audit.py` | Backlog consistency audit |
-| `scripts/taiga-update-on-merge.sh` | Post-merge sync (also run by `.github/workflows/taiga-sync.yml`) |
+| `scripts/taiga-update-on-merge.sh [--skip-if-synced]` | Post-merge sync for one ref (also run by `.github/workflows/taiga-sync.yml`) |
+| `scripts/taiga_sync_from_push.py` | The fork workflow's driver: pushed commits to merged upstream PRs to the update script |
 
 Raw REST callers use `https://backlog.growthgarage.org/api/v1/...` with header
 `x-disable-pagination: True`; see `.claude/skills/shared/taiga-pagination.md`.
@@ -227,8 +228,10 @@ Raw REST callers use `https://backlog.growthgarage.org/api/v1/...` with header
 ## GitHub conventions
 
 - **Branches and PRs live on `upstream`** (`MrsBohemian/Cholobots`, Heaven's repo; this account has
-  push rights; `main` is unprotected). `origin` (the Alterna-Dev-Studio fork) is only a mirror;
-  skills never need it.
+  push rights; `main` is unprotected). `origin` (the Alterna-Dev-Studio fork) is not
+  used for branches or PRs. Its `main` follows `upstream/main`, and a push to it runs the Taiga sync
+  (`.github/workflows/taiga-sync.yml` on the homelab self-hosted runners). The `TAIGA_*` secrets the
+  sync uses live on the fork.
 - `upstream` must use SSH: `git@github.com:MrsBohemian/Cholobots.git`. Git over HTTPS picks up the
   shell's `GH_TOKEN` PAT, which cannot push there. Fix it once per clone (worktrees share the
   clone's remotes): `git remote set-url upstream git@github.com:MrsBohemian/Cholobots.git`.
@@ -243,5 +246,6 @@ Raw REST callers use `https://backlog.growthgarage.org/api/v1/...` with header
 - Check out a PR branch: `git fetch upstream <branch>`, then work on it in a worktree.
 - Merge: `env -u GH_TOKEN gh pr merge <n> --repo MrsBohemian/Cholobots --squash` (`--merge` for stacked PRs in the merge train).
 - Branch names: `feature/<ref>-<slug>`, `fix/<ref>-<slug>`, `epic/<epic>-integration-<story>`.
-- Optional after a merge: `git push origin main` keeps the mirror in sync.
+- After a merge: `git fetch upstream && git push origin upstream/main:main` fast-forwards the fork and runs the
+  Taiga sync (`/merge-train` does it after each merge; never force it).
 - No CI yet (story #35): `gh pr checks` reports no checks, which counts as a pass with a note.

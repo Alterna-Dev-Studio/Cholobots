@@ -19,7 +19,7 @@ UPDATE_SCRIPT = os.path.join(SCRIPTS_DIR, "taiga-update-on-merge.sh")
 MIN_PR_ENV = "TAIGA_SYNC_MIN_UPSTREAM_PR"
 # Upstream PRs below #8 are never synced. PR #7 is #32's dump-only PR and #32
 # carries close-tasks-on-merge, so processing it would close #93/#96/#101
-# unfinished; #1 to #6 predate the merge-side-effect conventions.
+# unfinished. PRs up to #7 merged while no sync could run and are never replayed.
 DEFAULT_MIN_PR = 8
 ZERO_SHA = "0" * 40
 GITHUB_API = "https://api.github.com"
