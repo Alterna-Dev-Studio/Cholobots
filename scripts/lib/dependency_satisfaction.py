@@ -19,7 +19,7 @@ bare ``#ref`` mention in prose never counts.
 
 CLI::
 
-    python3 scripts/lib/dependency_satisfaction.py [--base <branch>] <ref>...
+    python3 scripts/lib/dependency_satisfaction.py [--base <branch>] [<ref>...]
 
 prints ``{"satisfied_refs": [...], "dependencies": {"<ref>": {...}}}``.
 ``--base`` defaults to ``$BASE_BRANCH``, then ``main``.
@@ -225,7 +225,8 @@ def parse_args(argv):
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--base", default=os.environ.get("BASE_BRANCH") or "main",
                         help="base branch a merged PR must target (default: $BASE_BRANCH or main)")
-    parser.add_argument("refs", nargs="+", type=int, help="out-of-run dependency refs")
+    parser.add_argument("refs", nargs="*", type=int,
+                        help="out-of-run dependency refs; none prints an empty result")
     return parser.parse_args(argv)
 
 

@@ -144,7 +144,8 @@ without creating any worktree. Fix the epic's diagram and re-invoke.
 
 Collect the **out-of-run refs**: every dep in the Step 2a map, for an eligible story, whose ref is
 not in the eligible story list. Classify them all in one call, with the run's `baseBranch`
-(Step 2c):
+(Step 2c). With no out-of-run refs, run it with none; it prints an empty result
+(`"satisfied_refs": []`) and makes no Taiga or GitHub call:
 
 ```bash
 python3 scripts/lib/dependency_satisfaction.py --base <baseBranch> <out-of-run refs...> \

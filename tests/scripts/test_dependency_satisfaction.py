@@ -305,3 +305,13 @@ class TestCli:
     def test_explicit_base_wins(self, monkeypatch):
         monkeypatch.setenv("BASE_BRANCH", "release")
         assert ds.parse_args(["--base", "main", "48"]).base == "main"
+
+    def test_no_refs_prints_an_empty_result(self, monkeypatch, capsys):
+        def unexpected(*args, **kwargs):
+            raise AssertionError("no lookup should run without refs")
+
+        monkeypatch.setattr(ds.subprocess, "run", unexpected)
+        assert ds.main(["--base", "main"]) == 0
+        assert json.loads(capsys.readouterr().out) == {
+            "base_branch": "main", "satisfied_refs": [], "dependencies": {},
+        }
