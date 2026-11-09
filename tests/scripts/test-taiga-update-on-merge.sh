@@ -1052,7 +1052,7 @@ item_patches() { count_calls 'PATCH .*/api/v1/(userstories|issues)/[0-9]+'; }
 # Test: --skip-if-synced skips a story already merged by this PR
 # ============================================================
 test_skip_if_synced_story_merged_comment() {
-    info "Test: --skip-if-synced skips a story with 'Merged in PR #536 ('"
+    info "Test: --skip-if-synced leaves a story with 'Merged in PR #536 (' alone"
     setup_mock_curl
     export MOCK_USERSTORY_HTTP_CODE=200
     write_story 76 '[]'
@@ -1060,7 +1060,7 @@ test_skip_if_synced_story_merged_comment() {
     write_history '"Merged in PR #536 (https://github.com/example/repo/pull/536). Status unchanged: no mark-done-on-merge label or tag."'
 
     local output
-    if output=$(PR_LABELS="close-tasks-on-merge mark-done-on-merge" run_script --skip-if-synced 689 536 "https://github.com/example/repo/pull/536" 2>&1); then
+    if output=$(PR_LABELS="mark-done-on-merge" run_script --skip-if-synced 689 536 "https://github.com/example/repo/pull/536" 2>&1); then
         if [ "$(item_patches)" -eq 0 ] && [ "$(task_patches)" -eq 0 ]; then
             pass "skip-if-synced story: no PATCH"
         else
@@ -1070,6 +1070,38 @@ test_skip_if_synced_story_merged_comment() {
             pass "skip-if-synced story: logs already synced"
         else
             fail "skip-if-synced story: expected 'already synced' in output: $output"
+        fi
+    else
+        fail "Script exited with error: $output"
+    fi
+
+    unset MOCK_USERSTORY_HTTP_CODE
+}
+
+# ============================================================
+# Test: --skip-if-synced still finishes a story's task closing
+# ============================================================
+# A run that posted the comment but failed a task PATCH exits nonzero; the
+# retry must close the remaining open tasks, not skip the whole item.
+test_skip_if_synced_story_retries_task_closing() {
+    info "Test: --skip-if-synced closes tasks left open by a partly failed run"
+    setup_mock_curl
+    export MOCK_USERSTORY_HTTP_CODE=200
+    write_story 76 '[]'
+    write_two_open_tasks
+    write_history '"Closed by PR #536 (https://github.com/example/repo/pull/536)"'
+
+    local output
+    if output=$(PR_LABELS="close-tasks-on-merge mark-done-on-merge" run_script --skip-if-synced 689 536 "https://github.com/example/repo/pull/536" 2>&1); then
+        if [ "$(item_patches)" -eq 0 ]; then
+            pass "skip-if-synced retry: no second status or comment PATCH"
+        else
+            fail "skip-if-synced retry: expected no item PATCH. Calls: $(cat "$MOCK_DIR/curl_calls.log")"
+        fi
+        if [ "$(task_patches)" -eq 2 ]; then
+            pass "skip-if-synced retry: open tasks closed"
+        else
+            fail "skip-if-synced retry: expected 2 task PATCHes, got $(task_patches). Output: $output"
         fi
     else
         fail "Script exited with error: $output"
@@ -1229,6 +1261,7 @@ test_story_lookup_server_error_fails
 test_issue_lookup_server_error_fails
 test_credentials_and_bodies_not_in_argv
 test_skip_if_synced_story_merged_comment
+test_skip_if_synced_story_retries_task_closing
 test_skip_if_synced_issue_closed_comment
 test_skip_if_synced_other_pr_proceeds
 test_skip_if_synced_history_error_fails
