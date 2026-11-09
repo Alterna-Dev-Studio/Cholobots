@@ -171,6 +171,20 @@ case "$URL" in
         fi
         if [ "$WRITE_OUT" = "%{http_code}" ]; then echo "${MOCK_TASK_PATCH_HTTP_CODE:-200}"; fi
         ;;
+    */api/v1/history/*)
+        # Item history (--skip-if-synced); MOCK_HISTORY_HTTP_CODE forces a failure
+        if [[ -f "$MOCK_DIR_LOCAL/history_response.json" ]]; then
+            RESPONSE=$(cat "$MOCK_DIR_LOCAL/history_response.json")
+        else
+            RESPONSE='[]'
+        fi
+        if [ -n "$OUTPUT_FILE" ]; then
+            echo "$RESPONSE" > "$OUTPUT_FILE"
+        else
+            echo "$RESPONSE"
+        fi
+        if [ "$WRITE_OUT" = "%{http_code}" ]; then echo "${MOCK_HISTORY_HTTP_CODE:-200}"; fi
+        ;;
     *)
         echo "MOCK_ERROR: unexpected URL: $URL" >&2
         exit 1
@@ -1022,6 +1036,162 @@ EOF
     unset MOCK_USERSTORY_HTTP_CODE
 }
 
+# Writes a history response whose entries carry the given comments (JSON strings).
+write_history() {
+    local entries="" comment
+    for comment in "$@"; do
+        entries+="${entries:+,}{\"comment\":${comment},\"diff\":{}}"
+    done
+    echo "[{\"comment\":\"\",\"diff\":{}},${entries}]" > "$MOCK_DIR/history_response.json"
+}
+
+# Any PATCH to a story or issue (status change or comment).
+item_patches() { count_calls 'PATCH .*/api/v1/(userstories|issues)/[0-9]+'; }
+
+# ============================================================
+# Test: --skip-if-synced skips a story already merged by this PR
+# ============================================================
+test_skip_if_synced_story_merged_comment() {
+    info "Test: --skip-if-synced skips a story with 'Merged in PR #536 ('"
+    setup_mock_curl
+    export MOCK_USERSTORY_HTTP_CODE=200
+    write_story 76 '[]'
+    write_two_open_tasks
+    write_history '"Merged in PR #536 (https://github.com/example/repo/pull/536). Status unchanged: no mark-done-on-merge label or tag."'
+
+    local output
+    if output=$(PR_LABELS="close-tasks-on-merge mark-done-on-merge" run_script --skip-if-synced 689 536 "https://github.com/example/repo/pull/536" 2>&1); then
+        if [ "$(item_patches)" -eq 0 ] && [ "$(task_patches)" -eq 0 ]; then
+            pass "skip-if-synced story: no PATCH"
+        else
+            fail "skip-if-synced story: expected no PATCH. Calls: $(cat "$MOCK_DIR/curl_calls.log")"
+        fi
+        if grep -q "already synced" <<< "$output"; then
+            pass "skip-if-synced story: logs already synced"
+        else
+            fail "skip-if-synced story: expected 'already synced' in output: $output"
+        fi
+    else
+        fail "Script exited with error: $output"
+    fi
+
+    unset MOCK_USERSTORY_HTTP_CODE
+}
+
+# ============================================================
+# Test: --skip-if-synced skips an issue already closed by this PR
+# ============================================================
+test_skip_if_synced_issue_closed_comment() {
+    info "Test: --skip-if-synced skips an issue with 'Closed by PR #536 ('"
+    setup_mock_curl
+    export MOCK_USERSTORY_HTTP_CODE=404
+    export MOCK_ISSUE_HTTP_CODE=200
+    cat > "$MOCK_DIR/issue_response.json" << 'EOF'
+{"id":200,"ref":1350,"subject":"Test bug","status":72,"version":3,"is_closed":false,"status_extra_info":{"name":"New","is_closed":false},"tags":[]}
+EOF
+    write_history '"Closed by PR #536 (https://github.com/example/repo/pull/536)"'
+
+    local output
+    if output=$(PR_LABELS="mark-done-on-merge" run_script --skip-if-synced 1350 536 "https://github.com/example/repo/pull/536" 2>&1); then
+        if [ "$(item_patches)" -eq 0 ]; then
+            pass "skip-if-synced issue: no PATCH"
+        else
+            fail "skip-if-synced issue: expected no PATCH. Calls: $(cat "$MOCK_DIR/curl_calls.log")"
+        fi
+        if [ "$(count_calls '/api/v1/history/issue/200')" -eq 1 ]; then
+            pass "skip-if-synced issue: reads the issue history"
+        else
+            fail "skip-if-synced issue: expected one /history/issue/200 call. Calls: $(cat "$MOCK_DIR/curl_calls.log")"
+        fi
+    else
+        fail "Script exited with error: $output"
+    fi
+
+    unset MOCK_USERSTORY_HTTP_CODE MOCK_ISSUE_HTTP_CODE
+}
+
+# ============================================================
+# Test: --skip-if-synced is anchored on the PR number
+# ============================================================
+test_skip_if_synced_other_pr_proceeds() {
+    info "Test: --skip-if-synced proceeds when history only mentions PR #5360"
+    setup_mock_curl
+    export MOCK_USERSTORY_HTTP_CODE=200
+    write_story 76 '[]'
+    write_history '"Merged in PR #5360 (https://github.com/example/repo/pull/5360). Status unchanged: no mark-done-on-merge label or tag."'
+
+    local output
+    if output=$(run_script --skip-if-synced 689 536 "https://github.com/example/repo/pull/536" 2>&1); then
+        if [ "$(count_calls 'PATCH .*/api/v1/userstories/[0-9]+ .*Merged in PR #536 ')" -eq 1 ]; then
+            pass "skip-if-synced other PR: comment PATCH posted"
+        else
+            fail "skip-if-synced other PR: expected one 'Merged in PR #536' PATCH. Calls: $(cat "$MOCK_DIR/curl_calls.log")"
+        fi
+        if [ "$(count_calls '/api/v1/history/userstory/100')" -eq 1 ]; then
+            pass "skip-if-synced other PR: reads the story history"
+        else
+            fail "skip-if-synced other PR: expected one /history/userstory/100 call"
+        fi
+    else
+        fail "Script exited with error: $output"
+    fi
+
+    unset MOCK_USERSTORY_HTTP_CODE
+}
+
+# ============================================================
+# Test: --skip-if-synced fails when the history read fails
+# ============================================================
+test_skip_if_synced_history_error_fails() {
+    info "Test: --skip-if-synced exits non-zero when history returns 500"
+    setup_mock_curl
+    export MOCK_USERSTORY_HTTP_CODE=200
+    export MOCK_HISTORY_HTTP_CODE=500
+    write_story 76 '[]'
+
+    local output
+    if output=$(run_script --skip-if-synced 689 536 "https://github.com/example/repo/pull/536" 2>&1); then
+        fail "skip-if-synced history 500: expected non-zero exit. Output: $output"
+    else
+        if [ "$(item_patches)" -eq 0 ]; then
+            pass "skip-if-synced history 500: exits non-zero without PATCH"
+        else
+            fail "skip-if-synced history 500: expected no PATCH. Calls: $(cat "$MOCK_DIR/curl_calls.log")"
+        fi
+    fi
+
+    unset MOCK_USERSTORY_HTTP_CODE MOCK_HISTORY_HTTP_CODE
+}
+
+# ============================================================
+# Test: without --skip-if-synced the history is never read
+# ============================================================
+test_no_flag_does_not_read_history() {
+    info "Test: without --skip-if-synced there is no history call"
+    setup_mock_curl
+    export MOCK_USERSTORY_HTTP_CODE=200
+    write_story 76 '[]'
+    write_history '"Merged in PR #536 (https://github.com/example/repo/pull/536)"'
+
+    local output
+    if output=$(run_script 689 536 "https://github.com/example/repo/pull/536" 2>&1); then
+        if [ "$(count_calls '/api/v1/history/')" -eq 0 ]; then
+            pass "no flag: history not read"
+        else
+            fail "no flag: expected no /history/ call. Calls: $(cat "$MOCK_DIR/curl_calls.log")"
+        fi
+        if [ "$(item_patches)" -eq 1 ]; then
+            pass "no flag: comment PATCH still posted"
+        else
+            fail "no flag: expected one PATCH. Calls: $(cat "$MOCK_DIR/curl_calls.log")"
+        fi
+    else
+        fail "Script exited with error: $output"
+    fi
+
+    unset MOCK_USERSTORY_HTTP_CODE
+}
+
 echo ""
 echo "=== taiga-update-on-merge.sh tests ==="
 echo ""
@@ -1058,6 +1228,11 @@ test_issue_missing_status_extra_info_skips
 test_story_lookup_server_error_fails
 test_issue_lookup_server_error_fails
 test_credentials_and_bodies_not_in_argv
+test_skip_if_synced_story_merged_comment
+test_skip_if_synced_issue_closed_comment
+test_skip_if_synced_other_pr_proceeds
+test_skip_if_synced_history_error_fails
+test_no_flag_does_not_read_history
 
 echo ""
 if [ "$FAILURES" -gt 0 ]; then

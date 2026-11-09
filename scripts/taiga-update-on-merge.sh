@@ -9,13 +9,16 @@ chmod 700 "$TMPDIR_SCRIPT"
 trap 'rm -rf "$TMPDIR_SCRIPT"' EXIT
 
 DRY_RUN=false
+SKIP_IF_SYNCED=false
 
 usage() {
-    echo "Usage: $0 [--dry-run] <ref> <pr-number> <pr-url>"
+    echo "Usage: $0 [--dry-run] [--skip-if-synced] <ref> <pr-number> <pr-url>"
     echo "  ref          Taiga item ref number"
     echo "  pr-number    GitHub PR number"
     echo "  pr-url       GitHub PR URL"
     echo "  --dry-run    Show what would be done without making changes"
+    echo "  --skip-if-synced  exit 0 without changes when the item already has a"
+    echo "                    'Merged in PR #N' or 'Closed by PR #N' comment"
     echo ""
     echo "Env vars required: TAIGA_API_URL, TAIGA_USERNAME, TAIGA_PASSWORD"
     echo "Env vars optional: PR_LABELS  whitespace-separated labels of the merged PR"
@@ -38,6 +41,7 @@ POSITIONAL=()
 for arg in "$@"; do
     case "$arg" in
         --dry-run) DRY_RUN=true ;;
+        --skip-if-synced) SKIP_IF_SYNCED=true ;;
         --help|-h) usage ;;
         *) POSITIONAL+=("$arg") ;;
     esac
@@ -149,6 +153,38 @@ else
         err "Issue lookup for #${REF} failed: HTTP $HTTP_CODE"
         cat "$TMPDIR_SCRIPT/issue.json" >&2
         exit 1
+    fi
+fi
+
+# Idempotency for re-pushes and catch-ups: the item's history already holds the
+# comment this script posts for this PR. The markers are the two COMMENT strings
+# below ("Merged in PR #N (" and "Closed by PR #N ("); if either changes, change
+# the pattern with it. The "(" anchor keeps PR #8 from matching "PR #80 (".
+# Read-only, so it runs in --dry-run too.
+if [[ "$SKIP_IF_SYNCED" == true ]]; then
+    if [[ "$ITEM_TYPE" == "userstories" ]]; then
+        HISTORY_TYPE="userstory"
+    else
+        HISTORY_TYPE="issue"
+    fi
+    HTTP_CODE=$(curl -s -o "$TMPDIR_SCRIPT/history.json" -w "%{http_code}" \
+        "${TAIGA_API_URL}/api/v1/history/${HISTORY_TYPE}/${ITEM_ID}" \
+        -H @<(auth_header) \
+        -H "x-disable-pagination: True")
+    if [[ "$HTTP_CODE" -ne 200 ]]; then
+        err "History lookup for #${REF} failed: HTTP $HTTP_CODE; cannot tell whether PR #${PR_NUMBER} was already synced"
+        cat "$TMPDIR_SCRIPT/history.json" >&2
+        exit 1
+    fi
+    ALREADY_SYNCED=$(python3 -c "
+import json, re, sys
+pattern = re.compile(r'(?:Merged in|Closed by) PR #%d \\(' % int(sys.argv[2]))
+entries = json.load(open(sys.argv[1]))
+print('yes' if any(pattern.search(e.get('comment') or '') for e in entries) else 'no')
+" "$TMPDIR_SCRIPT/history.json" "$PR_NUMBER")
+    if [[ "$ALREADY_SYNCED" == "yes" ]]; then
+        log "Item #${REF} already synced for PR #${PR_NUMBER}; skipping (--skip-if-synced)"
+        exit 0
     fi
 fi
 
