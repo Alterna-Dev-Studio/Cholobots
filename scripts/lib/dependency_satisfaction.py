@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-# ABOUTME: Decides whether an out-of-run epic dependency is satisfied: Done, or merged into the base branch.
+# ABOUTME: Decides whether an out-of-run epic dependency is satisfied: Done, or merged into the base branch
+# ABOUTME: with every open task gated (a ``## Gate`` section).
 # ABOUTME: Used by /implement-epic Step 2a-bis; claims are read with taiga-sync's own parser.
 """Out-of-run dependency satisfaction for /implement-epic.
 
@@ -9,11 +10,14 @@ Ready for review / Ready for test (no ``mark-done-on-merge``, or ``## Gate``
 human tasks still open). So a dependency is satisfied when:
 
 1. its story is ``Done``; or
-2. at least one *merged* PR into the base branch claims it, and no *open* PR
-   (into any base) still claims it.
+2. at least one *merged* PR into the base branch claims it, no *open* PR (into
+   any base) still claims it, and every open task of the story has a
+   ``## Gate`` section. A story can ship in several PRs, and a merged first
+   part with agent tasks still open is not finished; gated tasks (human or
+   post-merge steps) are allowed and reported in ``gated_tasks``.
 
 It is never satisfied when the story is ``Archived``, cannot be found, or a
-lookup fails; the reason is reported. "Claims" uses
+lookup (story, PRs or tasks) fails; the reason is reported. "Claims" uses
 ``scripts/taiga_closing_refs.py``, the parser ``taiga-sync.yml`` runs, so a
 bare ``#ref`` mention in prose never counts.
 
@@ -49,6 +53,11 @@ class LookupFailed(Exception):
     """A Taiga or GitHub lookup failed; the dependency counts as not satisfied."""
 
 
+def has_gate_section(description):
+    """True when a task description has a ``## Gate`` heading (it stays open after merge by design)."""
+    return bool(GATE_HEADING.search(description or ""))
+
+
 def claimed_refs(pr):
     """Taiga refs a PR claims, by the same rules as taiga-sync.yml."""
     return extract_closing_refs(pr.get("headRefName", ""), pr.get("title", ""), pr.get("body", ""))
@@ -68,14 +77,17 @@ def _open_tasks(story):
     return tasks
 
 
-def classify_dependency(ref, story, prs, base_branch="main", story_error=None, prs_error=None):
+def classify_dependency(ref, story, prs, base_branch="main", story_error=None, prs_error=None, gated_tasks=None):
     """Classify one out-of-run dependency.
 
     ``story`` is the ``scripts/taiga-story.sh <ref> 39 --with-tasks`` JSON, or
     None with ``story_error`` set. ``prs`` is the ``gh pr list --state all``
-    JSON list, or None with ``prs_error`` set. Returns a dict with
-    ``satisfied``, ``via`` ("done" | "merged" | None), ``reason``, ``status``,
-    ``merged_prs``, ``open_prs`` and ``open_tasks``.
+    JSON list, or None with ``prs_error`` set. ``gated_tasks`` is a callable
+    taking the open tasks and returning the gated ones (``{"ref", "subject"}``)
+    or raising ``LookupFailed``; it is only called on the merged path when a
+    task is open. Returns a dict with ``satisfied``, ``via`` ("done" |
+    "merged" | None), ``reason``, ``status``, ``merged_prs``, ``open_prs``,
+    ``open_tasks``, ``gated_tasks`` and ``open_agent_tasks`` (open, not gated).
     """
     result = {
         "ref": ref,
@@ -86,6 +98,8 @@ def classify_dependency(ref, story, prs, base_branch="main", story_error=None, p
         "merged_prs": [],
         "open_prs": [],
         "open_tasks": [],
+        "gated_tasks": [],
+        "open_agent_tasks": [],
     }
 
     if story is None:
@@ -122,11 +136,36 @@ def classify_dependency(ref, story, prs, base_branch="main", story_error=None, p
     elif not result["merged_prs"]:
         result["reason"] = f"story is {status} and no merged PR into {base_branch} claims it"
     else:
-        merged = ", ".join(f"#{n}" for n in result["merged_prs"])
-        result["satisfied"] = True
-        result["via"] = "merged"
-        result["reason"] = f"story is {status}; merged into {base_branch} by PR {merged}, no open PR claims it"
+        _check_tasks_after_merge(result, status, base_branch, gated_tasks)
     return result
+
+
+def _check_tasks_after_merge(result, status, base_branch, gated_tasks):
+    """Merged path: satisfied only when every open task is gated."""
+    merged = ", ".join(f"#{n}" for n in result["merged_prs"])
+    open_tasks = result["open_tasks"]
+    if open_tasks:
+        if gated_tasks is None:
+            result["reason"] = f"story is {status}; merged PR {merged} but no task lookup was available"
+            return
+        try:
+            result["gated_tasks"] = gated_tasks(open_tasks)
+        except LookupFailed as exc:
+            result["gated_tasks_error"] = str(exc)
+            result["reason"] = f"story is {status}; merged PR {merged} but the task lookup failed: {exc}"
+            return
+        gated_refs = {t["ref"] for t in result["gated_tasks"]}
+        result["open_agent_tasks"] = [t for t in open_tasks if t["ref"] not in gated_refs]
+        if result["open_agent_tasks"]:
+            refs = ", ".join(f"#{t['ref']}" for t in result["open_agent_tasks"])
+            result["reason"] = f"story is {status}; merged PR {merged} but agent tasks open: {refs}"
+            return
+    result["satisfied"] = True
+    result["via"] = "merged"
+    result["reason"] = f"story is {status}; merged into {base_branch} by PR {merged}, no open PR claims it"
+    if result["gated_tasks"]:
+        gated = ", ".join(f"#{t['ref']}" for t in result["gated_tasks"])
+        result["reason"] += f"; only gated tasks open: {gated}"
 
 
 def _run(cmd):
@@ -177,7 +216,7 @@ def fetch_gated_tasks(open_tasks):
         gated = []
         for t in open_tasks:
             detail = client.get(f"/api/v1/tasks/{t['id']}")
-            if GATE_HEADING.search((detail or {}).get("description") or ""):
+            if has_gate_section((detail or {}).get("description")):
                 gated.append({"ref": t["ref"], "subject": t["subject"]})
         return gated
     except TaigaError as exc:
@@ -206,14 +245,9 @@ def resolve(refs, base_branch="main", fetch_story=fetch_story, fetch_prs=fetch_p
     for ref in refs:
         story, story_error = stories[ref]
         result = classify_dependency(
-            ref, story, prs, base_branch=base_branch, story_error=story_error, prs_error=prs_error
+            ref, story, prs, base_branch=base_branch, story_error=story_error, prs_error=prs_error,
+            gated_tasks=gated_tasks,
         )
-        result["gated_tasks"] = []
-        if result["via"] == "merged" and result["open_tasks"]:
-            try:
-                result["gated_tasks"] = gated_tasks(result["open_tasks"])
-            except LookupFailed as exc:
-                result["gated_tasks_error"] = str(exc)
         if result["satisfied"]:
             satisfied.append(ref)
         dependencies[str(ref)] = result

@@ -1,5 +1,6 @@
 # ABOUTME: Pytest tests for scripts/lib/dependency_satisfaction.py.
-# ABOUTME: An out-of-run dependency is satisfied when Done, or merged into the base with no open claiming PR.
+# ABOUTME: An out-of-run dependency is satisfied when Done, or merged into the base with no open claiming PR
+# ABOUTME: and no open task outside a ``## Gate`` section.
 import json
 import os
 import subprocess
@@ -18,6 +19,7 @@ from dependency_satisfaction import (
     claimed_refs,
     fetch_prs,
     fetch_story,
+    has_gate_section,
     resolve,
 )
 
@@ -279,7 +281,7 @@ class TestResolve:
         assert result["dependencies"]["47"]["gated_tasks"] == []
         assert seen == [[90]]
 
-    def test_gated_task_lookup_failure_does_not_change_satisfaction(self):
+    def test_task_lookup_failure_is_not_satisfied(self):
         stories = {48: story(48, "Ready for test", [task(90, "Jon checks")])}
         prs = [pr(10, "MERGED", title="#48: Seed", branch="feature/48-seed")]
 
@@ -287,8 +289,115 @@ class TestResolve:
             raise LookupFailed("task fetch failed")
 
         result = resolve([48], fetch_story=lambda ref: stories[ref], fetch_prs=lambda: prs, gated_tasks=broken)
-        assert result["satisfied_refs"] == [48]
-        assert "task fetch failed" in result["dependencies"]["48"]["gated_tasks_error"]
+        assert result["satisfied_refs"] == []
+        dep = result["dependencies"]["48"]
+        assert dep["satisfied"] is False
+        assert "task fetch failed" in dep["reason"]
+        assert "task fetch failed" in dep["gated_tasks_error"]
+
+    def test_partial_pr_merged_with_agent_tasks_open_is_not_satisfied(self):
+        # PR #7 claimed #32 but carried only the baseline dump; #93, #96, #101 are still New.
+        tasks = [task(93, "Baseline migration"), task(96, "Migration docs"), task(101, "Seed check"),
+                 task(92, "Dump schema", closed=True)]
+        stories = {32: story(32, "In progress", tasks)}
+        prs = [pr(7, "MERGED", title="#32: Baseline schema dump", branch="feature/32-baseline")]
+        result = resolve([32], fetch_story=lambda ref: stories[ref], fetch_prs=lambda: prs,
+                         gated_tasks=lambda open_tasks: [])
+        dep = result["dependencies"]["32"]
+        assert result["satisfied_refs"] == []
+        assert dep["via"] is None
+        assert [t["ref"] for t in dep["open_agent_tasks"]] == [93, 96, 101]
+        assert "merged PR #7 but agent tasks open: #93, #96, #101" in dep["reason"]
+
+
+class TestHasGateSection:
+    def test_gate_heading_is_found(self):
+        assert has_gate_section("## What\n\nCheck it.\n\n## Gate\n\nJon runs it live.") is True
+
+    def test_gate_heading_with_trailing_text(self):
+        assert has_gate_section("## Gate: waits on #31\n") is True
+
+    def test_no_gate_heading(self):
+        assert has_gate_section("## What\n\nMentions a Gate in prose.\n### Gate subsection") is False
+
+    def test_empty_or_missing_description(self):
+        assert has_gate_section("") is False
+        assert has_gate_section(None) is False
+
+
+class TestTaskGate:
+    """Merged-PR satisfaction also needs every open task to be gated."""
+
+    MERGED = [pr(7, "MERGED", title="#32: Baseline schema dump", branch="feature/32-baseline")]
+
+    def classify(self, tasks, gated, status="In progress"):
+        return classify_dependency(32, story(32, status, tasks), self.MERGED, gated_tasks=gated)
+
+    def test_partial_pr_merged_with_open_agent_tasks_is_not_satisfied(self):
+        tasks = [task(93, "Baseline migration"), task(96, "Docs"), task(101, "Seed check"),
+                 task(110, "Jon applies it live")]
+        result = self.classify(tasks, lambda open_tasks: [{"ref": 110, "subject": "Jon applies it live"}])
+        assert result["satisfied"] is False
+        assert result["via"] is None
+        assert result["merged_prs"] == [7]
+        assert [t["ref"] for t in result["open_agent_tasks"]] == [93, 96, 101]
+        assert result["gated_tasks"] == [{"ref": 110, "subject": "Jon applies it live"}]
+        assert "merged PR #7 but agent tasks open: #93, #96, #101" in result["reason"]
+
+    def test_merged_with_only_gated_tasks_open_is_satisfied_and_reports_them(self):
+        tasks = [task(93, "Baseline migration", closed=True), task(110, "Jon applies it live")]
+        result = self.classify(tasks, lambda open_tasks: [{"ref": 110, "subject": "Jon applies it live"}])
+        assert result["satisfied"] is True
+        assert result["via"] == "merged"
+        assert result["gated_tasks"] == [{"ref": 110, "subject": "Jon applies it live"}]
+        assert result["open_agent_tasks"] == []
+
+    def test_merged_with_all_tasks_closed_is_satisfied_without_a_task_lookup(self):
+        def unexpected(open_tasks):
+            raise AssertionError("no task lookup when nothing is open")
+
+        tasks = [task(93, "Baseline migration", closed=True), task(96, "Docs", closed=True)]
+        result = self.classify(tasks, unexpected)
+        assert result["satisfied"] is True
+        assert result["via"] == "merged"
+
+    def test_merged_story_with_no_tasks_is_satisfied(self):
+        result = self.classify([], None)
+        assert result["satisfied"] is True
+        assert result["via"] == "merged"
+
+    def test_task_lookup_failure_is_not_satisfied(self):
+        def broken(open_tasks):
+            raise LookupFailed("HTTP 500 on /tasks/5093")
+
+        result = self.classify([task(93, "Baseline migration")], broken)
+        assert result["satisfied"] is False
+        assert result["via"] is None
+        assert "HTTP 500 on /tasks/5093" in result["reason"]
+        assert "HTTP 500 on /tasks/5093" in result["gated_tasks_error"]
+
+    def test_open_tasks_without_a_task_lookup_are_not_satisfied(self):
+        result = self.classify([task(93, "Baseline migration")], None)
+        assert result["satisfied"] is False
+        assert "task lookup" in result["reason"]
+
+    def test_done_with_open_agent_tasks_is_still_satisfied(self):
+        def unexpected(open_tasks):
+            raise AssertionError("Done needs no task lookup")
+
+        result = self.classify([task(93, "Baseline migration")], unexpected, status="Done")
+        assert result["satisfied"] is True
+        assert result["via"] == "done"
+
+    def test_open_pr_wins_over_the_task_check(self):
+        prs = self.MERGED + [pr(8, "OPEN", title="#32: rest of the migration", branch="feature/32-rest")]
+
+        def unexpected(open_tasks):
+            raise AssertionError("an open PR already decides it")
+
+        result = classify_dependency(32, story(32, "In progress", [task(93, "x")]), prs, gated_tasks=unexpected)
+        assert result["satisfied"] is False
+        assert "#8" in result["reason"]
 
 
 class TestCli:
