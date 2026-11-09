@@ -1,50 +1,49 @@
-# ABOUTME: GitHub Actions workflow that updates Taiga item status when a PR is merged.
-# ABOUTME: Catches all merge paths; Done/Closed and task closing are opt-in via close-tasks-on-merge / mark-done-on-merge label or tag.
+# ABOUTME: Post-merge Taiga sync, run on the fork Alterna-Dev-Studio/Cholobots when its main (which follows upstream/main) is pushed.
+# ABOUTME: Resolves each pushed commit to its merged upstream PR; Done/Closed and task closing stay opt-in via label or tag.
+#
+# The fork runs this because GitHub-hosted runners cannot reach Taiga
+# (https://backlog.growthgarage.org); the homelab self-hosted runners can. The
+# repository guard keeps MrsBohemian/Cholobots' copy of this file inert: a push
+# there creates a skipped run. The fork's main advances through /merge-train
+# (git push origin refs/remotes/upstream/main:refs/heads/main) or by hand.
 #
 # Requires repository secrets TAIGA_API_URL, TAIGA_USERNAME and TAIGA_PASSWORD on
-# MrsBohemian/Cholobots. They do not exist yet: until they are added, every merged PR
-# that claims a Taiga ref fails at "Verify Taiga login". Taiga project 39 (cholo-bots).
-name: Taiga Sync on PR Merge
+# Alterna-Dev-Studio/Cholobots (the agent account). Taiga project 39 (cholo-bots).
+#
+# Security: the fork is public and the runners are self-hosted, so this workflow
+# must never gain a trigger that a fork's PR can fire.
+name: Taiga Sync
 
 on:
-  pull_request:
-    types: [closed]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: taiga-sync
+  cancel-in-progress: false
 
 jobs:
   update-taiga:
-    if: github.event.pull_request.merged == true
-    runs-on: ubuntu-latest
+    if: github.repository == 'Alterna-Dev-Studio/Cholobots'
+    runs-on: [self-hosted, Linux, X64, small]
+    env:
+      # Upstream PRs below #8 are never synced: PR #7 is #32's dump-only PR and #32
+      # carries close-tasks-on-merge. Never re-run upstream's failed PR #7 sync run.
+      TAIGA_SYNC_MIN_UPSTREAM_PR: 8
     steps:
     - uses: actions/checkout@v7
       with:
+        fetch-depth: 0
         sparse-checkout: |
           scripts/taiga-update-on-merge.sh
           scripts/taiga_closing_refs.py
+          scripts/taiga_sync_from_push.py
         sparse-checkout-cone-mode: false
 
-    - name: Extract Taiga closing refs from PR
-      id: extract
-      env:
-        PR_BRANCH: ${{ github.event.pull_request.head.ref }}
-        PR_TITLE: ${{ github.event.pull_request.title }}
-        PR_BODY: ${{ github.event.pull_request.body }}
-      run: |
-        # A ref only counts where our conventions claim the work: a "#<ref>:"
-        # title prefix, a "fix(#<ref>):" scope, a trailing "(bug #<ref>)", a
-        # standalone "Fixes #<ref>" body line, or a feature/fix branch suffix.
-        # A bare mention must never close anything (bug #2237).
-        REFS=$(python3 scripts/taiga_closing_refs.py)
-        if [ -z "$REFS" ]; then
-          echo "PR #${{ github.event.pull_request.number }} claims no Taiga item (a bare #ref mention is not a claim)"
-          echo "found=false" >> "$GITHUB_OUTPUT"
-        else
-          echo "PR claims Taiga ref(s): $REFS"
-          echo "refs=$REFS" >> "$GITHUB_OUTPUT"
-          echo "found=true" >> "$GITHUB_OUTPUT"
-        fi
-
     - name: Verify Taiga login
-      if: steps.extract.outputs.found == 'true'
       env:
         TAIGA_API_URL: ${{ secrets.TAIGA_API_URL }}
         TAIGA_USERNAME: ${{ secrets.TAIGA_USERNAME }}
@@ -81,18 +80,17 @@ jobs:
         fi
         echo "Taiga login OK"
 
-    - name: Update Taiga item
-      if: steps.extract.outputs.found == 'true'
+    - name: Sync merged upstream PRs
       env:
         TAIGA_API_URL: ${{ secrets.TAIGA_API_URL }}
         TAIGA_USERNAME: ${{ secrets.TAIGA_USERNAME }}
         TAIGA_PASSWORD: ${{ secrets.TAIGA_PASSWORD }}
-        TAIGA_REFS: ${{ steps.extract.outputs.refs }}
-        PR_NUMBER: ${{ github.event.pull_request.number }}
-        PR_URL: ${{ github.event.pull_request.html_url }}
-        PR_LABELS: ${{ join(github.event.pull_request.labels.*.name, ' ') }}
+        GITHUB_TOKEN: ${{ github.token }}
+        PUSH_BEFORE: ${{ github.event.before }}
+        PUSH_AFTER: ${{ github.event.after }}
       run: |
+        # Claims are parsed by scripts/taiga_closing_refs.py (a bare #ref mention
+        # never closes anything); side effects run through
+        # scripts/taiga-update-on-merge.sh --skip-if-synced, once per claimed ref.
         chmod +x scripts/taiga-update-on-merge.sh
-        for ref in $TAIGA_REFS; do
-          ./scripts/taiga-update-on-merge.sh "$ref" "$PR_NUMBER" "$PR_URL"
-        done
+        python3 scripts/taiga_sync_from_push.py
