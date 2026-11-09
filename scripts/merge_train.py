@@ -25,7 +25,10 @@ Environment:
 
 Post-rebase check: `python -m py_compile cholobots.py config.py db/database.py bots/*.py`,
 then `python -m pytest -q tests --ignore=tests/scripts` once a unit-test suite exists (#34).
-After a merge into main the mirror is synced with `git push origin main` (failure ignored).
+After a merge into main the fork's main is fast-forwarded to upstream/main
+(`git push origin refs/remotes/upstream/main:refs/heads/main`, never forced), which runs
+the Taiga sync on Alterna-Dev-Studio/Cholobots. A failure is logged as a warning naming
+the manual command and does not stop the train.
 """
 
 import glob
@@ -1859,11 +1862,22 @@ def process_pr(sm, index, target, state_path):
     run_cmd(f"git checkout {_q(target)}", check=False)
     run_cmd(f"git pull {REMOTE} {_q(target)}", check=False)
     if target == "main":
-        # origin (Alterna-Dev-Studio/Cholobots) is only a mirror; keep its main in
-        # step when it is configured. A failure here never affects the train.
-        rc, _, stderr = run_cmd("git push origin main", check=False)
+        # origin is the fork Alterna-Dev-Studio/Cholobots; a push to its main runs
+        # .github/workflows/taiga-sync.yml, the post-merge Taiga sync. Push the
+        # fetched upstream main, not the local branch, and never force: a fork
+        # that has diverged must fail here rather than be overwritten. A failure
+        # never stops the train, but the sync then waits for a manual push.
+        run_cmd(f"git fetch {REMOTE} main", check=False)
+        rc, _, stderr = run_cmd(
+            f"git push origin refs/remotes/{REMOTE}/main:refs/heads/main", check=False
+        )
         if rc != 0:
-            log(f"Mirror sync (git push origin main) failed, ignoring: {stderr[:200]}")
+            log(
+                "WARNING: fork fast-forward failed; the Taiga sync on "
+                "Alterna-Dev-Studio/Cholobots will not run for this merge until "
+                f"someone runs: git fetch {REMOTE} && git push origin {REMOTE}/main:main. "
+                f"{stderr[:200]}"
+            )
 
     log(f"PR #{pr_num} merged successfully")
     return EXIT_OK
