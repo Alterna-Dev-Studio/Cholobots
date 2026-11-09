@@ -9,13 +9,18 @@ chmod 700 "$TMPDIR_SCRIPT"
 trap 'rm -rf "$TMPDIR_SCRIPT"' EXIT
 
 DRY_RUN=false
+SKIP_IF_SYNCED=false
+ALREADY_SYNCED=no
 
 usage() {
-    echo "Usage: $0 [--dry-run] <ref> <pr-number> <pr-url>"
+    echo "Usage: $0 [--dry-run] [--skip-if-synced] <ref> <pr-number> <pr-url>"
     echo "  ref          Taiga item ref number"
     echo "  pr-number    GitHub PR number"
     echo "  pr-url       GitHub PR URL"
     echo "  --dry-run    Show what would be done without making changes"
+    echo "  --skip-if-synced  when the item already has a 'Merged in PR #N' or 'Closed by PR #N'"
+    echo "                    comment, skip the status/comment step (a story's open tasks are"
+    echo "                    still closed when close-tasks-on-merge applies)"
     echo ""
     echo "Env vars required: TAIGA_API_URL, TAIGA_USERNAME, TAIGA_PASSWORD"
     echo "Env vars optional: PR_LABELS  whitespace-separated labels of the merged PR"
@@ -38,6 +43,7 @@ POSITIONAL=()
 for arg in "$@"; do
     case "$arg" in
         --dry-run) DRY_RUN=true ;;
+        --skip-if-synced) SKIP_IF_SYNCED=true ;;
         --help|-h) usage ;;
         *) POSITIONAL+=("$arg") ;;
     esac
@@ -152,6 +158,39 @@ else
     fi
 fi
 
+# Idempotency for re-pushes and catch-ups: the item's history already holds the
+# comment this script posts for this PR, so the status/comment step is skipped.
+# The task step still runs: it only touches tasks that are still open, and a
+# run that failed a task PATCH after posting the comment must finish on retry. The markers are the two COMMENT strings
+# below ("Merged in PR #N (" and "Closed by PR #N ("); if either changes, change
+# the pattern with it. The "(" anchor keeps PR #8 from matching "PR #80 (".
+# Read-only, so it runs in --dry-run too.
+if [[ "$SKIP_IF_SYNCED" == true ]]; then
+    if [[ "$ITEM_TYPE" == "userstories" ]]; then
+        HISTORY_TYPE="userstory"
+    else
+        HISTORY_TYPE="issue"
+    fi
+    HTTP_CODE=$(curl -s -o "$TMPDIR_SCRIPT/history.json" -w "%{http_code}" \
+        "${TAIGA_API_URL}/api/v1/history/${HISTORY_TYPE}/${ITEM_ID}" \
+        -H @<(auth_header) \
+        -H "x-disable-pagination: True")
+    if [[ "$HTTP_CODE" -ne 200 ]]; then
+        err "History lookup for #${REF} failed: HTTP $HTTP_CODE; cannot tell whether PR #${PR_NUMBER} was already synced"
+        cat "$TMPDIR_SCRIPT/history.json" >&2
+        exit 1
+    fi
+    ALREADY_SYNCED=$(python3 -c "
+import json, re, sys
+pattern = re.compile(r'(?:Merged in|Closed by) PR #%d \\(' % int(sys.argv[2]))
+entries = json.load(open(sys.argv[1]))
+print('yes' if any(pattern.search(e.get('comment') or '') for e in entries) else 'no')
+" "$TMPDIR_SCRIPT/history.json" "$PR_NUMBER")
+    if [[ "$ALREADY_SYNCED" == "yes" ]]; then
+        log "Item #${REF} already synced for PR #${PR_NUMBER}; skipping the status/comment step (--skip-if-synced)"
+    fi
+fi
+
 # Determine target status
 TARGET_STATUS=""
 if [[ "$ITEM_TYPE" == "userstories" ]]; then
@@ -212,8 +251,10 @@ patch_item() {
     fi
 }
 
-# Status step: an item already closed or at the target status is left alone.
-if [[ "$ITEM_STATUS_IS_CLOSED" == "True" ]] || [[ "$ITEM_STATUS" == "$TARGET_STATUS" ]]; then
+# Status step: an item already synced for this PR, closed, or at the target status is left alone.
+if [[ "$ALREADY_SYNCED" == "yes" ]]; then
+    :
+elif [[ "$ITEM_STATUS_IS_CLOSED" == "True" ]] || [[ "$ITEM_STATUS" == "$TARGET_STATUS" ]]; then
     log "Item #${REF} is already closed/done (status=${ITEM_STATUS}). Skipping status update."
 elif [[ -n "$MARK_DONE_SOURCE" && "$ITEM_STATUS_IS_CLOSED" != "False" ]]; then
     warn "Item #${REF}: status_extra_info.is_closed missing from Taiga response; closed state unknown. Skipping status update."

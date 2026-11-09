@@ -3493,8 +3493,63 @@ class TestCholobotsRepoWiring:
             assert call.endswith("--repo MrsBohemian/Cholobots"), call
         assert "git fetch upstream" in calls
         assert "git pull upstream main" in calls
-        assert "git push origin main" in calls
+        assert "git fetch upstream main" in calls
+        assert "git push origin refs/remotes/upstream/main:refs/heads/main" in calls
+        assert "git push origin main" not in calls
         assert not any("Alterna" in c for c in calls)
+
+
+class TestForkFastForward:
+    """After a merge into main the fork's main is fast-forwarded to upstream/main.
+
+    That push is what runs the Taiga sync on Alterna-Dev-Studio/Cholobots.
+    """
+
+    FORK_PUSH = "git push origin refs/remotes/upstream/main:refs/heads/main"
+
+    def _run(self, monkeypatch, tmp_path, extra_responses=()):
+        state_path = str(tmp_path / "state.json")
+        sm = _make_sm_for_process_pr(state_path)
+        fake_cmd, calls = _fake_run_cmd(list(extra_responses) + _merge_path_responses(["OPEN", "MERGED"]))
+        monkeypatch.setattr("merge_train.run_cmd", fake_cmd)
+        monkeypatch.setattr("merge_train.time.sleep", lambda s: None)
+        return process_pr(sm, 0, "main", state_path), calls
+
+    def test_fork_fast_forward_follows_the_upstream_fetch(self, monkeypatch, tmp_path):
+        result, calls = self._run(monkeypatch, tmp_path)
+        assert result == EXIT_OK
+        assert calls.index("git fetch upstream main") < calls.index(self.FORK_PUSH)
+
+    def test_fork_fast_forward_failure_is_logged_and_not_fatal(self, monkeypatch, tmp_path, capsys):
+        result, calls = self._run(
+            monkeypatch, tmp_path,
+            [(self.FORK_PUSH, (1, "", "! [rejected] main -> main (non-fast-forward)"))],
+        )
+        assert result == EXIT_OK
+        err = capsys.readouterr().err
+        assert "WARNING: fork fast-forward failed" in err
+        assert "git fetch upstream && git push origin upstream/main:main" in err
+        assert "non-fast-forward" in err
+
+    def test_failed_upstream_fetch_skips_the_push_and_warns(self, monkeypatch, tmp_path, capsys):
+        # A stale refs/remotes/upstream/main could push "successfully" without the
+        # merge, so the sync would silently miss it.
+        result, calls = self._run(
+            monkeypatch, tmp_path,
+            [("git fetch upstream main", (128, "", "fatal: unable to access upstream"))],
+        )
+        assert result == EXIT_OK
+        assert self.FORK_PUSH not in calls
+        err = capsys.readouterr().err
+        assert "WARNING: fork fast-forward failed" in err
+        assert "git fetch upstream && git push origin upstream/main:main" in err
+        assert "unable to access upstream" in err
+
+    def test_fork_fast_forward_never_forces(self, monkeypatch, tmp_path):
+        _, calls = self._run(monkeypatch, tmp_path)
+        pushes = [c for c in calls if c.startswith("git push")]
+        assert pushes
+        assert not any("--force" in c or " -f" in c or ":+" in c or " +" in c for c in pushes)
 
 
 class TestBuildChecks:

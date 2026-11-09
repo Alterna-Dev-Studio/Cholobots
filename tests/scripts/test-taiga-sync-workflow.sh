@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ABOUTME: Unit tests for the taiga-sync.yml workflow definition itself.
-# ABOUTME: Guards that a failed Taiga auth or item update turns the run red and that PR labels reach the update script.
+# ABOUTME: Guards the fork-only push trigger, the self-hosted runner, the PR floor, and that a failed sync turns the run red.
 set -euo pipefail
 
 # Colors for output
@@ -27,27 +27,106 @@ if [ ! -f "$WORKFLOW" ]; then
 fi
 pass "workflow file exists"
 
+# Comments are dropped before the structural checks so prose about what the
+# workflow must never do cannot satisfy or trip them.
+BODY=$(sed -E 's/[[:space:]]+#.*$//; /^[[:space:]]*#/d' "$WORKFLOW")
+
+# Checks one literal line (indentation ignored) is present in the workflow body.
+has_line() {
+    grep -qxF "$1" <<< "$(sed -E 's/^[[:space:]]+//' <<< "$BODY")"
+}
+
+expect_line() {
+    local line="$1" what="$2"
+    if has_line "$line"; then
+        pass "$what"
+    else
+        fail "$what (missing line: $line)"
+    fi
+}
+
 # A sync that cannot sync must not look green: continue-on-error at any level
 # would mask a failed login or a failed item update as a successful run.
-if grep -qE '^[[:space:]]*continue-on-error:' "$WORKFLOW"; then
+if grep -qE '^[[:space:]]*continue-on-error:' <<< "$BODY"; then
     fail "taiga-sync.yml has no continue-on-error (a failed step must fail the run)"
     grep -nE '^[[:space:]]*continue-on-error:' "$WORKFLOW"
 else
     pass "taiga-sync.yml has no continue-on-error (a failed step must fail the run)"
 fi
 
-# Without the mask, the benign "PR carries no Taiga ref" path must still be
-# green — it stays green only because both Taiga steps are skipped.
-for step in "Verify Taiga login" "Update Taiga item"; do
-    guard=$(grep -A1 "name: $step" "$WORKFLOW" | grep -c "if: steps.extract.outputs.found == 'true'" || true)
-    if [ "$guard" -eq 1 ]; then
-        pass "'$step' is guarded on found == 'true'"
+# The fork is public and its runners are self-hosted: any trigger a fork PR can
+# fire would let outside code onto the homelab runners.
+for trigger in pull_request pull_request_target workflow_run issue_comment; do
+    if grep -qE "(^|[^a-z_])${trigger}([^a-z_]|$)" <<< "$BODY"; then
+        fail "taiga-sync.yml has no '$trigger' trigger"
     else
-        fail "'$step' is guarded on found == 'true'"
+        pass "taiga-sync.yml has no '$trigger' trigger"
     fi
 done
 
-# A pre-HTTP curl failure is ambiguous on its own — DNS, TLS, and a malformed
+ON_BLOCK=$(sed -n '/^on:/,/^[a-z]/p' <<< "$BODY")
+if grep -qE '^[[:space:]]+push:' <<< "$ON_BLOCK" && grep -qE '^[[:space:]]+branches: \[main\]' <<< "$ON_BLOCK"; then
+    pass "triggered by push to main"
+else
+    fail "triggered by push to main"
+fi
+
+# Upstream (MrsBohemian/Cholobots) carries the same file; the guard keeps its
+# copy inert so a push there never waits for a runner it does not have.
+expect_line "if: github.repository == 'Alterna-Dev-Studio/Cholobots'" "job is guarded to the fork"
+expect_line "runs-on: [self-hosted, Linux, X64, small]" "runs on the homelab self-hosted runners"
+expect_line "TAIGA_SYNC_MIN_UPSTREAM_PR: 8" "PR floor TAIGA_SYNC_MIN_UPSTREAM_PR is 8"
+expect_line "contents: read" "permissions are contents: read"
+# A concurrency group keeps only one pending run and cancels the older pending
+# one, even with cancel-in-progress: false; each run covers only its own push
+# range, so the cancelled push's PRs would never be synced.
+if grep -qE '^[[:space:]]*concurrency:' <<< "$BODY"; then
+    fail "taiga-sync.yml has no concurrency group (a cancelled pending run loses its push range)"
+else
+    pass "taiga-sync.yml has no concurrency group (a cancelled pending run loses its push range)"
+fi
+expect_line "fetch-depth: 0" "checkout has full history for the push range"
+
+# A script the workflow calls but never checks out only fails at runtime, on
+# a real merge -- the sparse-checkout list must carry all three.
+SPARSE=$(sed -n '/sparse-checkout: |/,/sparse-checkout-cone-mode/p' <<< "$BODY")
+for script in scripts/taiga-update-on-merge.sh scripts/taiga_closing_refs.py scripts/taiga_sync_from_push.py; do
+    if grep -qF "$script" <<< "$SPARSE"; then
+        pass "sparse-checkout lists $script"
+    else
+        fail "sparse-checkout lists $script"
+    fi
+done
+
+# The inline extractor treated any bare #ref mention as a claim (bug #2237).
+# It must not creep back in -- extraction goes through taiga_closing_refs.py,
+# which the driver imports.
+if grep -qE "grep -oP '#\\\\K\\\\d\\+'" "$WORKFLOW"; then
+    fail "taiga-sync.yml has no inline bare-#ref extractor"
+    grep -nE "grep -oP '#\\\\K\\\\d\\+'" "$WORKFLOW"
+else
+    pass "taiga-sync.yml has no inline bare-#ref extractor"
+fi
+
+SYNC_STEP=$(sed -n '/name: Sync merged upstream PRs/,$p' <<< "$BODY")
+if grep -qF 'PUSH_BEFORE: ${{ github.event.before }}' <<< "$SYNC_STEP" \
+    && grep -qF 'PUSH_AFTER: ${{ github.event.after }}' <<< "$SYNC_STEP"; then
+    pass "sync step passes the push range from github.event.before/after"
+else
+    fail "sync step passes the push range from github.event.before/after"
+fi
+if grep -qF 'python3 scripts/taiga_sync_from_push.py' <<< "$SYNC_STEP"; then
+    pass "sync step runs scripts/taiga_sync_from_push.py"
+else
+    fail "sync step runs scripts/taiga_sync_from_push.py"
+fi
+if grep -qF 'GITHUB_TOKEN: ${{ github.token }}' <<< "$SYNC_STEP"; then
+    pass "sync step passes GITHUB_TOKEN for the upstream PR lookup"
+else
+    fail "sync step passes GITHUB_TOKEN for the upstream PR lookup"
+fi
+
+# A pre-HTTP curl failure is ambiguous on its own -- DNS, TLS, and a malformed
 # URL all look identical without the exit code, which sent a real investigation
 # after the wrong cause. The message must name it.
 if grep -q 'curl exit \$CURL_EXIT_CODE' "$WORKFLOW"; then
@@ -57,7 +136,7 @@ else
 fi
 
 # Case labels are literal text, and one of them ('35|60') contains a regex
-# metacharacter — so normalize the indentation away and match literally rather
+# metacharacter -- so normalize the indentation away and match literally rather
 # than building a pattern out of the label.
 NORMALIZED=$(sed -E 's/^[[:space:]]+//; s/\)[[:space:]]+DIAGNOSIS=/) DIAGNOSIS=/' "$WORKFLOW")
 
@@ -70,36 +149,30 @@ for label in '6' '7' '28' '35|60'; do
     fi
 done
 
-# The inline extractor treated any bare #ref mention as a claim (bug #2237).
-# It must not creep back in — extraction has to go through the shared script.
-if grep -qE "grep -oP '#\\\\K\\\\d\\+'" "$WORKFLOW"; then
-    fail "taiga-sync.yml has no inline bare-#ref extractor"
-    grep -nE "grep -oP '#\\\\K\\\\d\\+'" "$WORKFLOW"
-else
-    pass "taiga-sync.yml has no inline bare-#ref extractor"
-fi
+# Structural check when PyYAML is available; the greps above stand alone without it.
+if python3 -c 'import yaml' 2>/dev/null; then
+    if python3 - "$WORKFLOW" <<'PY'
+import sys
+import yaml
 
-if grep -q 'scripts/taiga_closing_refs.py' "$WORKFLOW"; then
-    pass "taiga-sync.yml invokes scripts/taiga_closing_refs.py"
+doc = yaml.safe_load(open(sys.argv[1]))
+on = doc.get("on", doc.get(True))  # PyYAML reads a bare `on` key as True
+assert set(on) == {"push"}, on
+assert on["push"] == {"branches": ["main"]}, on
+job = doc["jobs"]["update-taiga"]
+assert job["if"] == "github.repository == 'Alterna-Dev-Studio/Cholobots'", job["if"]
+assert job["runs-on"] == ["self-hosted", "Linux", "X64", "small"], job["runs-on"]
+assert str(job["env"]["TAIGA_SYNC_MIN_UPSTREAM_PR"]) == "8"
+assert doc["permissions"] == {"contents": "read"}, doc["permissions"]
+assert "concurrency" not in doc and "concurrency" not in job
+PY
+    then
+        pass "YAML parses and has the expected trigger, guard, runner, floor and permissions"
+    else
+        fail "YAML parses and has the expected trigger, guard, runner, floor and permissions"
+    fi
 else
-    fail "taiga-sync.yml invokes scripts/taiga_closing_refs.py"
-fi
-
-# A script the workflow calls but never checks out only fails at runtime, on
-# a real merge -- the sparse-checkout list must carry it too.
-if grep -A3 'sparse-checkout:' "$WORKFLOW" | grep -q 'scripts/taiga_closing_refs.py'; then
-    pass "sparse-checkout lists scripts/taiga_closing_refs.py"
-else
-    fail "sparse-checkout lists scripts/taiga_closing_refs.py"
-fi
-
-# The update script's side effects are opt-in via the merged PR's labels, so
-# the step must forward them from the event payload (no extra token needed).
-UPDATE_STEP=$(sed -n '/name: Update Taiga item/,/run: |/p' "$WORKFLOW")
-if grep -qF "PR_LABELS: \${{ join(github.event.pull_request.labels.*.name, ' ') }}" <<< "$UPDATE_STEP"; then
-    pass "'Update Taiga item' forwards PR_LABELS from github.event.pull_request.labels.*.name"
-else
-    fail "'Update Taiga item' forwards PR_LABELS from github.event.pull_request.labels.*.name"
+    info "PyYAML not installed; structural YAML check skipped"
 fi
 
 echo ""
