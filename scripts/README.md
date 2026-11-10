@@ -2,7 +2,8 @@
 
 Helpers the `.claude/skills` pipeline calls for Taiga (project 39, `cholo-bots`, on
 https://backlog.growthgarage.org) and GitHub (`MrsBohemian/Cholobots`). They are stdlib-only
-Python 3.14 and bash (`curl`, `jq`, `git`, `gh`; `codex` for reviews). None of them runs the bot.
+Python 3.14 and bash (`curl`, `jq`, `git`, `gh`; `codex` for reviews), except
+`check_local_env.py` (see [Local development](#local-development)). None of them runs the bot.
 
 ## Environment
 
@@ -90,6 +91,12 @@ for a scope that does not exist.
 | `check_schema_coverage.py [--repo-root .] [--migrations supabase/migrations] [--mobile-dir D] [--json]` | Lists every table/view the bots (`.table("x")` in `bots/*.py`, `db/database.py`) and dashboards (`.from("x")` in `D/*.html`, `D/assets/*.js`) reference, and whether `supabase/migrations/*.sql` defines it, with kind, RLS state and policy count; objects nobody references are listed separately. `--mobile-dir` defaults to `mobile/`, else `../Cholobots-Mobile` (pass it explicitly from a worktree). Exit 0 all present, 1 something missing, 2 a directory not found. A dashboard-read table with RLS off is a `WARN` line, not a failure. Reads files only; never connects to Supabase |
 | `supabase_migrations.py lint [--dir D] [--base REF]` / `check-push-plan PLAN\|-` | `lint` checks `supabase/migrations/` names (14-digit timestamp, lowercase snake case, no duplicates, one baseline that is the earliest) and, with `--base`, that a PR only adds migrations newer than the base's newest and never edits, renames or deletes merged ones. `check-push-plan` reads `supabase db push --dry-run` output and fails when the baseline is pending. Used by `.github/workflows/supabase-db-push.yml`; see `docs/database-migrations.md`. Reads files and git only; never connects to Supabase |
 
+## Local development
+
+| Script | Purpose |
+|---|---|
+| `check_local_env.py [--env-file F]` | Preflight `make run` calls before `cholobots.py`. Resolves `.env` over the shell the way `config.py` does (`override=True`) and exits 1, one line per problem on stderr, unless `SUPABASE_URL` is on `127.0.0.1`, `localhost` or `::1` and `DISCORD_TOKEN`, `OPENAI_API_KEY`, `SUPABASE_SERVICE_ROLE_KEY` are non-empty and `TRANSPORTATION_CHANNEL_ID` (when set) is an integer. No override: production runs through the `Procfile`, not `make`. Unlike the pipeline scripts it needs python-dotenv, so it runs with the bot venv (`.venv/bin/python`) |
+
 ## Tests
 
 ```bash
@@ -98,4 +105,4 @@ python -m pytest tests/scripts -q
 for t in tests/scripts/test-*.sh; do bash "$t" || echo "FAILED: $t"; done
 ```
 
-The tests mock `curl`, `gh` and `codex`; none of them needs network access or credentials.
+The tests mock `curl`, `gh` and `codex`; none of them needs network access or credentials. The `.env`-file cases in `test_check_local_env.py` skip unless python-dotenv is installed (`requirements.txt`).
