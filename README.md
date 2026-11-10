@@ -13,27 +13,36 @@ A Discord bot that hosts six Spanglish-speaking personas for running a small con
 
 Data lives in Supabase. The companion repo [Cholobots-Mobile](https://github.com/MrsBohemian/Cholobots-Mobile) is a set of static dashboards that read the same Supabase project.
 
-## Local development
+## Quickstart
 
-Run the bot against a Supabase stack on your own machine, never against the hosted project.
+From a fresh clone to the bot answering in your own test Discord server. Everything runs against a Supabase stack on your machine, never the hosted project. `make help` lists every target.
 
-1. **Prerequisites.**
-   - Python: `python3.14 -m venv .venv && . .venv/bin/activate && pip install -r requirements.txt` (the version in `.python-version`)
-   - Docker: Docker Engine on Linux; Docker Desktop (or OrbStack) on macOS; on Windows use WSL2 with Docker Desktop's WSL integration and run everything from the WSL shell.
-   - Supabase CLI 2.121.0: via Node 18+ (`alias supabase='npx --yes supabase@2.121.0'`), or Homebrew (`brew install supabase/tap/supabase`) or Scoop. `supabase --version` should print 2.121.0.
-2. **Start the stack.** `supabase start` (the first run pulls images and takes several minutes). It runs Postgres, Auth, Storage, the REST API and Studio in Docker and prints the API URL (`http://127.0.0.1:54321`), Studio (`http://127.0.0.1:54323`) and the keys; `supabase status -o env` prints them again. Edge Functions are off in `supabase/config.toml` because the repo has none.
-3. **Write `.env`.** `cp .env.example .env`, then fill `SUPABASE_SERVICE_ROLE_KEY` from the `SERVICE_ROLE_KEY` line of `supabase status -o env` (`SUPABASE_URL` already points at the local API), `DISCORD_TOKEN` (a **test** bot token, never the production one; see [docs/test-discord-server.md](docs/test-discord-server.md)) and `OPENAI_API_KEY`. `.env` is loaded with `override=True`, so it silently wins over your shell: keep the hosted URL, the hosted service-role key and the production Discord token out of it. A wrong or empty value shows up as a `create_client` error when the process starts.
-4. **Know what is in the database.** The local database has the baseline schema (`supabase/migrations/`) plus the fictitious seed data described under [Seed data](#seed-data). `supabase db reset` rebuilds it from the migrations and the seed.
-5. **Run.** `python cholobots.py` (only with the test token), and `supabase stop` when you are done.
+1. **Prerequisites.** git, GNU make, Python 3.14 (the version in `.python-version`), Docker running (Docker Engine on Linux, Docker Desktop or OrbStack on macOS) and Node 18+ for `npx`. On Windows, use WSL2 with Docker Desktop's WSL integration and run everything from the WSL shell. The Makefile runs the Supabase CLI as `npx --yes supabase@2.121.0`; if you installed that same version with Homebrew (`brew install supabase/tap/supabase`) or Scoop, add `SUPABASE=supabase` to each `make db-*` command. `supabase --version` should print 2.121.0.
+2. **Install.**
+   ```bash
+   git clone https://github.com/MrsBohemian/Cholobots.git && cd Cholobots
+   make setup
+   ```
+   This creates `.venv`, installs the pinned requirements and the pre-commit hook, and copies [.env.example](.env.example) to `.env` (an existing `.env` is left alone).
+3. **Start the database.** `make db-up` (the first run pulls images and takes several minutes). It runs Postgres, Auth, Storage, the REST API and Studio in Docker: the API is at `http://127.0.0.1:54321` and Studio at `http://127.0.0.1:54323`. Edge Functions are off in `supabase/config.toml` because the repo has none. Then `make db-reset` rebuilds the database from the baseline schema in `supabase/migrations/` plus the fictitious seed data described under [Seed data](#seed-data).
+4. **Point `.env` at it.** `make db-env` prints a `SUPABASE_URL=` and a `SUPABASE_SERVICE_ROLE_KEY=` line; paste both into `.env`, replacing the lines already there. `.env` is loaded with `override=True`, so it silently wins over your shell: keep the hosted URL, the hosted service-role key and the production Discord token out of it. A wrong or empty value shows up as a `create_client` error when the process starts.
+5. **Discord.** Create your own test application, bot and server as [docs/test-discord-server.md](docs/test-discord-server.md) describes, so nobody has to invite you. Turn on the bot's **Message Content Intent** (without it no `!` command is seen) and put its token in `DISCORD_TOKEN`. Never the production token.
+6. **OpenAI.** Any non-empty `OPENAI_API_KEY` lets the bot start; receipt scanning and Chismebot summaries need a real key.
+7. **Run.** `make run`. It first checks `.env` and refuses to start, listing each problem, when `SUPABASE_URL` is not the local stack, a required secret is empty, or `TRANSPORTATION_CHANNEL_ID` is not a whole number. The console then shows `✅ Logged in as <your test bot>`. In the test server, `!cholobots` answers with the persona overview, and `!cshow Olive` shows a seeded contact card.
+8. **Day to day.** `make check` (compile, `ruff`, unit and script tests) before you push, `make test-integration` once story #51 adds those tests, and `make db-down` when you are done.
 
-Required variables: `DISCORD_TOKEN`, `OPENAI_API_KEY`, `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`. The full list, including optional variables and which ones crash the process at import, is in [CLAUDE.md](CLAUDE.md). Static checks: `python -m py_compile cholobots.py config.py db/database.py bots/*.py` and `ruff check .`.
+Two local quirks: your test accounts are not in the bot's hardcoded user map, so Metichebot files them under Heaven's daily tasks (harmless locally, and the seed relies on it, see [Seed data](#seed-data); story #40 replaces the map), and once `!mtoday` is set up in a channel, any message there that does not start with `!` becomes a time block.
+
+Required variables: `DISCORD_TOKEN`, `OPENAI_API_KEY`, `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`. The full list, including optional variables and which ones crash the process at import, is in [CLAUDE.md](CLAUDE.md).
+
+**Without make.** The targets are thin wrappers, so the raw commands work too: `python3.14 -m venv .venv && . .venv/bin/activate && pip install -r requirements.txt -r requirements-dev.txt && pre-commit install`, `npx --yes supabase@2.121.0 start` / `db reset` / `status -o env` / `stop`, and the static checks `python -m py_compile cholobots.py config.py db/database.py bots/*.py` and `ruff check .`. `python cholobots.py` skips the local-stack check that `make run` does, so double-check `.env` first.
 
 ### Seed data
 
-`supabase/seed.sql` loads one obviously fictitious contracting business, and `supabase db reset` runs it after the migrations (`[db.seed]` in `supabase/config.toml`). The reset is one command against the local Docker stack only, never with `--linked`:
+`supabase/seed.sql` loads one obviously fictitious contracting business, and `make db-reset` (`supabase db reset`) runs it after the migrations (`[db.seed]` in `supabase/config.toml`). The reset is one command against the local Docker stack only, never with `--linked`:
 
 ```bash
-npx --yes supabase@2.121.0 db reset
+make db-reset    # or: npx --yes supabase@2.121.0 db reset
 ```
 
 It takes about 30 s. Stop the bot first: its in-memory sessions would point at rows the reset deleted.
@@ -58,7 +67,7 @@ Owner only, once per machine. `supabase login` stores the access token in the CL
 
 ## Development environment
 
-**Secrets stay out of the repo.** `.env`, `.envrc` and `.envrc.local` are git-ignored. The recommended pattern is [direnv](https://direnv.net/): a project `.envrc` that exports variables from an encrypted store (Growth Garage collaborators use a SOPS/age vault with `scripts/envtool export project/<name>`), so nothing secret is ever written to disk in plaintext inside the checkout. Run `direnv allow` after creating or changing it.
+**Secrets stay out of the repo.** `.env`, `.envrc` and `.envrc.local` are git-ignored; never commit any of them. The bot's variables live in `.env`, and because `config.py` loads it with `override=True` it wins over anything your shell or direnv exports. A [direnv](https://direnv.net/) `.envrc` is for shell-only variables, such as the `TAIGA_*` credentials the pipeline scripts read: it can `dotenv_if_exists .env.local` or export from an encrypted store (Growth Garage collaborators use a SOPS/age vault, see [scripts/README.md](scripts/README.md#credentials) for the exact lines), so nothing secret is written to disk in plaintext inside the checkout. Run `direnv allow` after creating or changing it.
 
 **Schema changes.** Never edit the database schema in the Supabase dashboard or SQL editor. Every change is a new file under `supabase/migrations/` (`supabase migration new <name>`) reviewed in a PR; the production push is gated off. See [docs/database-migrations.md](docs/database-migrations.md).
 
