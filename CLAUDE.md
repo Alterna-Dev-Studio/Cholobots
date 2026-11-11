@@ -13,11 +13,11 @@ Work is tracked in Taiga project `cholo-bots` (id 39) on https://backlog.growthg
 ```bash
 make setup      # .venv (Python pinned in .python-version), == pins from requirements*.txt, pre-commit hook, .env from .env.example
 make db-up      # local Supabase stack; make db-reset rebuilds it, make db-env prints the two .env lines, make db-down stops it
-make check      # compile, lint (ruff), test (tests/unit + tests/scripts pytest, then every tests/scripts/test-*.sh); make test-integration skips until #51
-make run        # scripts/check_local_env.py, then python cholobots.py; production runs python cholobots.py via the Procfile
+make check      # compile, ruff, pytest tests/unit + tests/scripts, then every tests/scripts/test-*.sh
+make run        # scripts/check_local_env.py, then python cholobots.py (production uses the Procfile)
 ```
 
-The `Makefile` is the task runner (`make help` lists the targets, `tests/scripts/test_makefile.py` pins each recipe). `make run` runs `scripts/check_local_env.py` first, which resolves `.env` over the shell like `config.py` and refuses a non-local `SUPABASE_URL`, empty `DISCORD_TOKEN`/`OPENAI_API_KEY`/`SUPABASE_SERVICE_ROLE_KEY` and a non-integer `TRANSPORTATION_CHANNEL_ID`. Agents never run `make run` (it starts the bot), same as `python cholobots.py`; `make setup`, `make check`, `make -n <target>` and the `db-*` targets against the local Docker stack are fine.
+`make help` lists the targets; `tests/scripts/test_makefile.py` pins each recipe. `scripts/check_local_env.py` refuses a non-local `SUPABASE_URL`, an empty required secret or a non-integer `TRANSPORTATION_CHANNEL_ID`. Agents never run `make run` or `python cholobots.py` (they start the bot); `make setup`, `make check`, `make -n <target>` and the `db-*` targets against the local Docker stack are fine.
 
 `supabase/` holds the Supabase CLI project (`config.toml` and `migrations/`, CLI pinned to 2.121.0). `supabase start` runs a local stack in Docker (API `http://127.0.0.1:54321`, Edge Functions off); point `SUPABASE_URL`/`SUPABASE_SERVICE_ROLE_KEY` at it from `supabase status -o env` (see README "Quickstart"). `supabase db reset` (local only) rebuilds it from the migrations plus `supabase/seed.sql`, a fictitious business; the fake-data rules are in README "Seed data" and enforced by `tests/unit/test_seed_contract.py`. Agents never run `supabase login`/`link` or anything against the hosted project.
 
