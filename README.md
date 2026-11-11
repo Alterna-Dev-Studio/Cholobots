@@ -20,17 +20,17 @@ Run the bot against a Supabase stack on your own machine, never against the host
 1. **Prerequisites.**
    - Python: `python3.14 -m venv .venv && . .venv/bin/activate && pip install -r requirements.txt` (the version in `.python-version`)
    - Docker: Docker Engine on Linux; Docker Desktop (or OrbStack) on macOS; on Windows use WSL2 with Docker Desktop's WSL integration and run everything from the WSL shell.
-   - Supabase CLI pinned to 2.121.0, either through Node 18+ (`npx --yes supabase@2.121.0 <cmd>`; handy as `alias supabase='npx --yes supabase@2.121.0'`) or installed with Homebrew (`brew install supabase/tap/supabase`) or Scoop. Check `supabase --version` prints 2.121.0.
-2. **Start the stack.** `supabase start` (the first run pulls images and takes several minutes). It runs Postgres, Auth, Storage, the REST API and Studio in Docker and prints the API URL (`http://127.0.0.1:54321`), Studio (`http://127.0.0.1:54323`) and the keys; `supabase status -o env` prints them again. Edge Functions are turned off in `supabase/config.toml` because the repo has none.
+   - Supabase CLI 2.121.0: via Node 18+ (`alias supabase='npx --yes supabase@2.121.0'`), or Homebrew (`brew install supabase/tap/supabase`) or Scoop. `supabase --version` should print 2.121.0.
+2. **Start the stack.** `supabase start` (the first run pulls images and takes several minutes). It runs Postgres, Auth, Storage, the REST API and Studio in Docker and prints the API URL (`http://127.0.0.1:54321`), Studio (`http://127.0.0.1:54323`) and the keys; `supabase status -o env` prints them again. Edge Functions are off in `supabase/config.toml` because the repo has none.
 3. **Write `.env`.** `cp .env.example .env`, then fill `SUPABASE_SERVICE_ROLE_KEY` from the `SERVICE_ROLE_KEY` line of `supabase status -o env` (`SUPABASE_URL` already points at the local API), `DISCORD_TOKEN` (a **test** bot token, never the production one; see [docs/test-discord-server.md](docs/test-discord-server.md)) and `OPENAI_API_KEY`. `.env` is loaded with `override=True`, so it silently wins over your shell: keep the hosted URL, the hosted service-role key and the production Discord token out of it. A wrong or empty value shows up as a `create_client` error when the process starts.
-4. **Know what is in the database.** The local database has the baseline schema (`supabase/migrations/`) but no data until the seed data lands (story #48), so commands that read rows find nothing. `supabase db reset` rebuilds it from the migrations.
+4. **Know what is in the database.** The local database has the baseline schema (`supabase/migrations/`) and no data, so commands that read rows find nothing. `supabase db reset` rebuilds it from the migrations.
 5. **Run.** `python cholobots.py` (only with the test token), and `supabase stop` when you are done.
 
 Required variables: `DISCORD_TOKEN`, `OPENAI_API_KEY`, `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`. The full list, including optional variables and which ones crash the process at import, is in [CLAUDE.md](CLAUDE.md). Static checks: `python -m py_compile cholobots.py config.py db/database.py bots/*.py` and `ruff check .`.
 
 ### Linking to the hosted project (owner only)
 
-Run once per machine by the project owner; nobody else needs it. `supabase login` stores the access token in the CLI's own home-directory or keychain storage (or export `SUPABASE_ACCESS_TOKEN` through direnv); it never goes in the repo. Then `supabase link --project-ref <hosted project ref>` (it prompts for the database password). The link state lives in `supabase/.temp/`, which is git-ignored. Do not run `supabase db push` or any other write against the hosted project; the migration workflow is Taiga story #49.
+Owner only, once per machine. `supabase login` stores the access token in the CLI's own home-directory or keychain storage (or export `SUPABASE_ACCESS_TOKEN` through direnv); it never goes in the repo. Then `supabase link --project-ref <hosted project ref>` (it prompts for the database password). The link state lives in `supabase/.temp/`, which is git-ignored. Do not run `supabase db push` or any other write against the hosted project.
 
 ## Development environment
 
