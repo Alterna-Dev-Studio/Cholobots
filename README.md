@@ -11,7 +11,7 @@ A Discord bot that hosts six Spanglish-speaking personas for running a small con
 | Obi Juan | `!obijuan` | subcontractor "quests", clock-in/out, payouts |
 | Vueltabot | `!vueltabot` | marketplace listings and delivery gigs |
 
-Data lives in Supabase. The companion repo [Cholobots-Mobile](https://github.com/MrsBohemian/Cholobots-Mobile) is a set of static dashboards that read the same Supabase project.
+Data lives in Supabase. `mobile/` holds static dashboards that read the same Supabase project ([mobile/README.md](mobile/README.md)), published at https://mrsbohemian.github.io/Cholobots/.
 
 ## Quickstart
 
@@ -103,6 +103,8 @@ Owner only, once per machine. `supabase login` stores the access token in the CL
 
 `make run` checks that `.env` points at the local Supabase stack (`scripts/check_local_env.py`), then starts the bot; `python cholobots.py` skips the check. Either way it connects to Discord with the token in `.env`, so use your own test bot and never point a local `.env` at the hosted Supabase project or the production Discord token. Coding agents never start the bot.
 
+To browse the dashboards locally: `python -m http.server 8000 --directory mobile` (open http://localhost:8000/).
+
 ## Resetting data
 
 `make db-reset` (or `npx --yes supabase@2.121.0 db reset`) rebuilds the local database from `supabase/migrations/` and reloads the fictitious [seed data](#seed-data). It only touches the local Docker stack. Stop the bot first.
@@ -161,6 +163,7 @@ Access, the branch and pull-request flow, database changes, the command checklis
 - `bots/` — one module per persona
 - `db/database.py` — legacy SQLite helpers plus the Supabase `metiche_weekly` accessors
 - `config.py` — env loading and the shared OpenAI client
+- `mobile/` — static dashboards, published to GitHub Pages by `.github/workflows/pages.yml`. For a page's full history use `git log -- mobile/<file> <file>` (commits before the subtree import use the old path).
 - `supabase/` — Supabase CLI project: `config.toml` for the local stack and `migrations/`, the database schema of record, starting from a baseline dumped from the hosted project
 - `Makefile` — setup, local stack, run, check and test targets (`make help`)
 - `tests/` — `unit/` (no network), `integration/` (local Supabase stack), `scripts/` (pipeline script tests)

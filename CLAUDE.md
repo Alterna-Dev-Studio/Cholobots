@@ -6,7 +6,7 @@ Branch and pull-request flow, database migrations, the command checklist and com
 
 ## What this is
 
-Cholobots is a single Discord bot (discord.py, `!` prefix) that hosts six personas for a small contracting business (Handley Man): Metichebot (planning, daily tasks, time tracking, pings), Chismebot (CRM / leads), Guardabot (inventory), Crudobot (job costing, closeout, receipts), Obi Juan (subcontractor "quests"), Vueltabot (marketplace / delivery gigs). Data lives in Supabase. A sibling repo, `../Cholobots-Mobile`, is a set of static HTML dashboards reading the same Supabase project with a publishable key.
+Cholobots is a single Discord bot (discord.py, `!` prefix) that hosts six personas for a small contracting business (Handley Man): Metichebot (planning, daily tasks, time tracking, pings), Chismebot (CRM / leads), Guardabot (inventory), Crudobot (job costing, closeout, receipts), Obi Juan (subcontractor "quests"), Vueltabot (marketplace / delivery gigs). Data lives in Supabase. `mobile/` is a set of static HTML dashboards reading the same Supabase project with a publishable key; only `mobile/` is published to GitHub Pages.
 
 Work is tracked in Taiga project `cholo-bots` (id 39) on https://backlog.growthgarage.org. The roadmap is `Cholobots_48_Hour_Development_Plan.md` at the repo root.
 
@@ -73,3 +73,4 @@ Each pipeline worktree runs its own local Supabase stack, started and stopped th
 - Command names are mostly prefixed per bot (`m*`, `c*`, `g*`, `crudo*`, `o*`), but plenty of unprefixed names exist: Obi Juan (`note`, `update`, `accept`, `materials`, `labor`, `payout`, `paid`, `questcreate`...), Vueltabot (`tengo`, `busco`, `vuelta`, `claim`, `tripclaim`), Chismebot (`lead`, `leads`, `chisme`, `hotlist`, `cancel`, aliases `stove`/`oven`/`stovetop`), and `report`/`close` as subcommands of the `!crudo` group. Check for collisions before adding a command.
 - Persona voice is Spanglish and in-character; help text is hand-written per bot and is already out of sync with real command names in several places. When you add or rename a command, update that bot's `!<name>` help and the `!cholobots` text in `cholobots.py`.
 - Customer/project lookups are `ilike %text%` substring matches with small limits; a new lookup should follow the existing helper in that module rather than add another variant.
+- `mobile/` history comes from a subtree merge: never rebase a branch that contains that merge and never squash-merge it (use a merge commit).
