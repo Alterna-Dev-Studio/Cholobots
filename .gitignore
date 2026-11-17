@@ -8,3 +8,6 @@ __pycache__/
 .envrc.local
 .claude/worktrees/
 output/
+.supabase-local/
+.mcp.json
+.claude/settings.local.json

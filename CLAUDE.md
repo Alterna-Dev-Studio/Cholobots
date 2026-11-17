@@ -1,6 +1,8 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+Guidance for coding agents (Claude Code and Codex) and people working in this repository. `AGENTS.md` is a symlink to this file for Codex; edit `CLAUDE.md`, never `AGENTS.md`.
+
+Branch and pull-request flow, database migrations, the command checklist and commit attribution, for people and agents alike, are in [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## What this is
 
@@ -11,16 +13,28 @@ Work is tracked in Taiga project `cholo-bots` (id 39) on https://backlog.growthg
 ## Running
 
 ```bash
-python -m venv .venv && . .venv/bin/activate
-pip install -r requirements.txt      # unpinned: discord.py, python-dotenv, openai, supabase
-python cholobots.py                  # same as the Procfile worker
+make setup      # .venv (Python pinned in .python-version), == pins from requirements*.txt, pre-commit hook, .env from .env.example
+make db-up      # local Supabase stack; make db-reset rebuilds it, make db-env prints the two .env lines, make db-down stops it
+make check      # compile, ruff, pytest tests/unit + tests/scripts, then every tests/scripts/test-*.sh
+make test-integration  # pytest tests/integration against the local stack (needs make db-up)
+make run        # scripts/check_local_env.py, then python cholobots.py (production uses the Procfile)
 ```
+
+`.devcontainer/` gives a container with the Supabase CLI and Docker-in-Docker; its `post-start.sh` resets the in-container database and rewrites `SUPABASE_URL`/`SUPABASE_SERVICE_ROLE_KEY`/`DISCORD_TOKEN`/`OPENAI_API_KEY` in `.env`, and never starts the bot. See the README's Devcontainer section.
+
+`make help` lists the targets; `tests/scripts/test_makefile.py` pins each recipe. `scripts/check_local_env.py` refuses a non-local `SUPABASE_URL`, an empty required secret or a non-integer `TRANSPORTATION_CHANNEL_ID`. Agents never run `make run` or `python cholobots.py` (they start the bot); `make setup`, `make check`, `make -n <target>` and the `db-*` targets against the local Docker stack are fine.
+
+`supabase/` holds the Supabase CLI project (`config.toml` and `migrations/`, CLI pinned to 2.121.0). `supabase start` runs a local stack in Docker (API `http://127.0.0.1:54321`, Edge Functions off); point `SUPABASE_URL`/`SUPABASE_SERVICE_ROLE_KEY` at it from `supabase status -o env` (see README "Quickstart"). `supabase db reset` (local only) rebuilds it from the migrations plus `supabase/seed.sql`, a fictitious business; the fake-data rules are in README "Seed data" and enforced by `tests/unit/test_seed_contract.py`. Agents never run `supabase login`/`link` or anything against the hosted project.
 
 `config.py` runs `load_dotenv(override=True)`, so `.env` wins over the real environment. Required or the process dies at import: `DISCORD_TOKEN`, `OPENAI_API_KEY`, `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY` (chismebot, guardabot and crudobot call `create_client` unguarded at module level; vueltabot does the same but is imported inside `on_ready`, so its failure surfaces there instead, see below; obijuan, metichebot and `db/database.py` degrade to a `None` client). `db/database.py` and vueltabot also accept `SUPABASE_KEY` as a fallback name; the other modules do not. Optional: `GUARDABOT_DB` (SQLite path, default `guardabot.db`), `DATA_SERVICE_URL` (dashboard push; when unset every metichebot time block replies "Saved, but dashboard push failed", crudobot's read of it is silent and unused), `TRANSPORTATION_CHANNEL_ID` (parsed with `int()`, default `0`), `DANIEL_MORNING_AUDIO_URL` (YouTube default), `CRUDOBOT_RECEIPT_MODEL` (default `gpt-5-mini`; chismebot's summary model is hardcoded to the same).
 
-`cholobots.py` calls `bot.run()` at module level with no `__main__` guard: importing it starts the bot. For static checks use `python -m py_compile cholobots.py config.py db/database.py bots/*.py`.
+`.env.example` is the env contract (kept in sync by `tests/unit/test_env_example_contract.py`); [docs/test-discord-server.md](docs/test-discord-server.md) covers the test Discord server and running against the local Supabase stack.
 
-There are no tests, linters or CI for the bot itself yet (Taiga stories #33, #34, #35). The Supabase schema is not in the repo; column names must be inferred from the queries in each bot module.
+`cholobots.py` calls `bot.run()` only under `if __name__ == "__main__":`, but importing it still imports `config` (which raises without the env vars) and runs `create_client` in three bot modules, so tests never import it. For static checks use `python -m py_compile cholobots.py config.py db/database.py bots/*.py`.
+
+Lint is ruff, configured in `ruff.toml` (rules `E4`, `E7`, `E9`, `F`; per-file exceptions listed there with reasons) and run with `ruff check .` or the pre-commit hook; `ruff format` is not enforced. The bot has no unit tests yet. CI is GitHub Actions on `MrsBohemian/Cholobots`: workflow `checks` (`make check-tools` plus `make check`) and workflow `integration` (`make test-integration` on a fresh local Supabase stack), on every pull request with no branch or path filter and on pushes to `main`; no secrets, never the hosted project. Each workflow's one job has the workflow's name, and the two must stay identical: `scripts/monitor-pr-stability.sh` matches branch-protection contexts (job names) against workflow-run names. The Supabase CLI version in `integration.yml` must match `SUPABASE_CLI_VERSION` in the Makefile; `tests/scripts/test-ci-workflows.sh` checks that and the rest of both files. The schema of record is `supabase/migrations/`, starting from `20261109194905_remote_baseline.sql`, a dump of the hosted project's `public` schema (tables, views, functions, triggers, RLS policies, grants). Read column names and types there, and check every reader before changing a column's meaning. Schema changes ship as new migration files ([docs/database-migrations.md](docs/database-migrations.md)); nobody edits the hosted schema by hand, including in the Supabase dashboard or SQL editor. `python3 scripts/check_schema_coverage.py --mobile-dir <dashboards dir>` checks that every table the bots and dashboards reference is defined there.
+
+Integration tests (`tests/integration/`) drive command callbacks and `on_message` listeners against the local Supabase stack with a faked Discord context. The harness re-seeds the database before each test and refuses any non-local URL; open bugs are strict xfails that the fix PR un-marks. See `docs/testing-conventions.md`.
 
 ## Agent pipeline
 
@@ -28,13 +42,19 @@ There are no tests, linters or CI for the bot itself yet (Taiga stories #33, #34
 
 Prerequisites: `python3 scripts/taiga_project_setup.py --check` must exit 0. If it exits 2, Jon runs it with `--apply` using the admin scope of his `~/work/utils/jon-dev-env` vault, because the agent account cannot change project settings; `scripts/README.md` has the command. The helper scripts in `scripts/` read `TAIGA_API_URL`, `TAIGA_USERNAME`, `TAIGA_PASSWORD` from the shell only. The git-ignored `.envrc` exports the agent account's values through direnv from that vault's `project/taiga-growthgarage-slave1-codex` scope. Every `gh` call is `env -u GH_TOKEN gh ... --repo MrsBohemian/Cholobots`; pipeline branches are pushed to the `upstream` remote and PRs open there. Script tests: `pip install -r requirements-dev.txt && python -m pytest tests/scripts -q`.
 
+Agents can also run in a devcontainer made by `scripts/devcontainer/launch.sh` (a clone, or a worktree with `--worktree`); the container's GitHub access is `CHOLOBOTS_CONTAINER_GH_TOKEN` only, never the host `GH_TOKEN`, and `launch.sh` refuses a main checkout (see `scripts/README.md`). The pre-built image `launch.sh` pulls is built by `.github/workflows/build-devcontainer.yml` (published only on a push to `main`); its tool pins live in `.devcontainer/Dockerfile.prebuild` and `tools/pytaiga-mcp/install.sh`, listed by `scripts/devcontainer/pins.sh`.
+
+`/implement-epic` and `/parallel-fix-bugs` run each item in its own devcontainer when n > 1 (`scripts/devcontainer/orchestrate_epic.py`, `orchestrate_bugs.py`; `--worktrees` keeps worktrees), and no pipeline run ever starts the bot.
+
+Each pipeline worktree runs its own local Supabase stack, started and stopped through `scripts/supabase-local.sh` (see `.claude/skills/shared/taiga-project.md`, "Local Supabase stacks"). Never point a worktree at another checkout's stack, and never at the hosted project.
+
 ## Architecture
 
 **Registration happens three different ways** (`cholobots.py`): `register_chisme/metiche/guard/crudo(bot)` run once at import and define commands as closures; `setup_obijuan(bot)` adds a Cog inside `on_ready`; vueltabot is loaded with `bot.load_extension("bots.vueltabot")` inside `on_ready`. The two `on_ready` loads are guarded by `bot.obijuan_loaded`/`bot.vuelta_loaded` because `on_ready` fires on reconnect. `on_ready` order is: SQLite init, Obi Juan, vueltabot, then start Metichebot's 30-second scheduler (`MeticheManager.start_loop`, guarded by a `loop_task.done()` check). Any exception in the vueltabot load (missing env, bad `TRANSPORTATION_CHANNEL_ID`) ends `on_ready` early: the process stays up with no ping/wakeup scheduler, and retries on every reconnect.
 
 **Every bot module creates its own Supabase client** at import with the service-role key, so Row Level Security is bypassed everywhere and nothing is scoped by guild, company or user. There is no tenant column on any table. `db/database.py` is a legacy SQLite layer: only `insert_metiche_checkin` still writes to it; `insert_metiche_weekly`/`fetch_latest_metiche_weekly` live in that file but actually use Supabase; the `guard_events`, `metiche_logs` and `crudo_reports` helpers have no callers. Crudobot's historic reports (`!crudojc`, `!crudoestimate`, `!crudoreport`) read/write local JSON files in the working directory.
 
-**Shared tables are the cross-bot contract.** Metichebot reads `crudo_projects`/`crudo_project_tasks` and inserts `crudo_labor_entries` (one row per time block with duration > 0 when a `!mtoday` session is linked to a Crudo project; insert failures are only printed); Crudobot sums those entries per task in `!crudotime`/`!crudoclose`. Crudobot and Chismebot read and write `chisme_contacts`; Metichebot reads it. Obi Juan's tables (`obijuan_*`, `wtp_*`) and timecards are not linked to any of the above, and Obi Juan silently falls back to in-memory dicts when its Supabase client is `None`. The mobile dashboards read ~15 of these tables plus `chisme_dashboard_contacts`, which nothing in this repo references.
+**Shared tables are the cross-bot contract.** Metichebot reads `crudo_projects`/`crudo_project_tasks` and inserts `crudo_labor_entries` (one row per time block with duration > 0 when a `!mtoday` session is linked to a Crudo project; insert failures are only printed); Crudobot sums those entries per task in `!crudotime`/`!crudoclose`. Crudobot and Chismebot read and write `chisme_contacts`; Metichebot reads it. Obi Juan's tables (`obijuan_*`, `wtp_*`) and timecards are not linked to any of the above, and Obi Juan silently falls back to in-memory dicts when its Supabase client is `None`. The mobile dashboards read 15 of these tables plus `chisme_dashboard_contacts`, an updatable view over `chisme_contacts` that no bot references and that is not `security_invoker`, so the dashboards' publishable key reads and writes it past `chisme_contacts` RLS.
 
 **Conversation state is in-memory.** Multi-step flows keep dicts keyed by `author.id` only (chismebot's six `*_sessions` dicts, crudobot's receipt sessions, metichebot's `mdice_waiting` closure local) or by channel (metichebot's `active_time_sessions`). None of them expire; a session lives until it completes, is cancelled, or the process restarts, while Supabase-backed ping schedules keep firing. `bot.wait_for` prompts have no timeout except in `!mengine` and vueltabot's `ask_user`, so an abandoned prompt hangs forever (≈18 sites in metichebot, crudobot's `ask()` helper).
 
@@ -51,6 +71,6 @@ Prerequisites: `python3 scripts/taiga_project_setup.py --check` must exit 0. If 
 ## Conventions
 
 - Command names are mostly prefixed per bot (`m*`, `c*`, `g*`, `crudo*`, `o*`), but plenty of unprefixed names exist: Obi Juan (`note`, `update`, `accept`, `materials`, `labor`, `payout`, `paid`, `questcreate`...), Vueltabot (`tengo`, `busco`, `vuelta`, `claim`, `tripclaim`), Chismebot (`lead`, `leads`, `chisme`, `hotlist`, `cancel`, aliases `stove`/`oven`/`stovetop`), and `report`/`close` as subcommands of the `!crudo` group. Check for collisions before adding a command.
-- Persona voice is Spanglish and in-character; help text is hand-written per bot and is already out of sync with real command names in several places. When you add or rename a command, update that bot's `!<name>` help and the `!queso` text in `cholobots.py`.
+- Persona voice is Spanglish and in-character; help text is hand-written per bot and is already out of sync with real command names in several places. When you add or rename a command, update that bot's `!<name>` help and the `!cholobots` text in `cholobots.py`.
 - Customer/project lookups are `ilike %text%` substring matches with small limits; a new lookup should follow the existing helper in that module rather than add another variant.
 - `mobile/` history comes from a subtree merge: never rebase a branch that contains that merge and never squash-merge it (use a merge commit).

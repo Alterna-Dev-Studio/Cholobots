@@ -120,8 +120,8 @@ The two merge tags are defined in `.claude/skills/shared/merge-side-effects.md`.
 **Surface** (exactly one per bug): `product` (a bot command or dashboard behaviour; add every
 per-bot tag that applies alongside it, or none with a triage comment saying no bot could be
 determined), `devx` (local setup, venv, env vars, Supabase local stack, seeding), `pipeline`
-(skills, agents, scripts, Taiga and GitHub automation), `ci` (GitHub Actions, once story #35 adds
-them). `ci` and `devx` are the surface tags. The pre-existing topic tag `devex` (different
+(skills, agents, scripts, Taiga and GitHub automation), `ci` (GitHub Actions: the `checks` and `integration`
+workflows). `ci` and `devx` are the surface tags. The pre-existing topic tag `devex` (different
 spelling) and the other topic tags below are kept alongside the surface tag; "drop any second
 surface tag" applies only to `product`, `devx`, `pipeline` and `ci`.
 
@@ -225,6 +225,34 @@ exports them through direnv from the SOPS vault). Default project is 39.
 Raw REST callers use `https://backlog.growthgarage.org/api/v1/...` with header
 `x-disable-pagination: True`; see `.claude/skills/shared/taiga-pagination.md`.
 
+## Local Supabase stacks
+
+Every checkout that runs integration tests gets its own local Supabase stack, never the hosted
+project. `scripts/supabase-local.sh` (core in `scripts/supabase_local.py`) manages it.
+
+- **Main checkout, CI and the devcontainer** use the default ports (API 54321, DB 54322) and project
+  id `cholobots`. The devcontainer (`CHOLOBOTS_DEVCONTAINER=1`) has its own Docker daemon, so
+  containers on one machine do not collide.
+- **Worktrees** (`.claude/worktrees/<story|bug>-<ref>`) each get project id
+  `cholobots-<directory name>-<8 hex of the full path's hash>` (same-named worktrees in different
+  places never share a stack) and a slot `n` (1 to 99) allocated on first `start`. Every port is the
+  default plus `10*n` (API `54321+10n`, DB `54322+10n`), except the inspector (8083 plus `n`). Slots are
+  recorded in `cholobots-supabase-slots.json` in the git common dir (flock-guarded); the rendered config
+  and a mirror of `supabase/` live in the worktree's git-ignored `.supabase-local/`. Worktree stacks
+  skip `studio`, `mailpit`, `imgproxy`, `logflare`, `vector` and `edge-runtime` unless
+  `SUPABASE_LOCAL_EXCLUDE` says otherwise.
+- **Commands.** `scripts/supabase-local.sh start|stop|status|env|prune [checkout-path]`. `env` prints
+  `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY` and `SUPABASE_DB_URL`. `stop` also frees the slot and
+  removes `.supabase-local/`. `prune` stops stacks whose worktree no longer exists, deleted directories
+  included. Only `db reset|diff|lint`, `migration new|list|up` and `test db` are forwarded to the
+  Supabase CLI, with the checkout path right after the command words; every other command and the
+  hosted flags (`--linked`, `--db-url`, `--project-ref`) are refused.
+- **Who starts and stops.** `/implement-story`, `/fully-implement-story`, `/implement-epic`,
+  `/fix-single-bug`, `/fully-fix-bugs` and `/parallel-fix-bugs` start the stack when they create a
+  worktree and stop it before removing the worktree; a failure is a warning (`STACK_WARN`), never a
+  stop. Pass the worktree path so the script acts on that worktree, not the main checkout. A worktree
+  must never use another checkout's stack. `make test-integration` picks up its own checkout's values.
+
 ## GitHub conventions
 
 - **Branches and PRs live on `upstream`** (`MrsBohemian/Cholobots`, Heaven's repo; this account has
@@ -248,4 +276,4 @@ Raw REST callers use `https://backlog.growthgarage.org/api/v1/...` with header
 - Branch names: `feature/<ref>-<slug>`, `fix/<ref>-<slug>`, `epic/<epic>-integration-<story>`.
 - After a merge: `git fetch upstream && git push origin upstream/main:main` fast-forwards the fork and runs the
   Taiga sync (`/merge-train` does it after each merge; never force it).
-- No CI yet (story #35): `gh pr checks` reports no checks, which counts as a pass with a note.
+- CI: `gh pr checks` reports `checks` and `integration` (GitHub Actions, every PR and every push to `main`). A PR whose branch predates the workflows has no runs: it counts as passed after a two-minute grace when its base requires no checks, otherwise it stays `PENDING` until rebased.
