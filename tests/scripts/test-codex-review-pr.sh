@@ -154,6 +154,7 @@ MOCKSCRIPT
 #!/usr/bin/env bash
 echo "\$@" >> "\$MOCK_DIR/codex_calls.log"
 pwd >> "\$MOCK_DIR/codex_cwd.log"
+echo "\$(date +%s.%N) pid=\$\$ ppid=\$PPID sid=\$(ps -o sid= -p \$\$)" >> "\$MOCK_DIR/codex_trace.log"
 cat > "\$MOCK_DIR/codex_stdin.log"
 
 if [[ -f "\$MOCK_DIR/codex_exit_code" ]]; then
@@ -1240,7 +1241,7 @@ codex_calls=$(wc -l < "$MOCK_DIR/codex_calls.log" 2>/dev/null || echo 0)
 if [[ "$codex_calls" -eq 1 ]]; then
     pass "codex was invoked exactly once across both racing invocations"
 else
-    fail "Expected exactly 1 codex invocation, got: $codex_calls"
+    fail "Expected exactly 1 codex invocation, got: $codex_calls DIAG: $(cat "$MOCK_DIR/codex_trace.log" "$MOCK_DIR/codex_cwd.log") OUT1: $race_out1 OUT2: $race_out2 POSTS: $(cat "$MOCK_DIR/post_calls.log")"
 fi
 post_count=$(wc -l < "$MOCK_DIR/post_calls.log" 2>/dev/null || echo 0)
 if [[ "$post_count" -eq 1 ]]; then
