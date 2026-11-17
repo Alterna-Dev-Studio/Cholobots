@@ -154,7 +154,6 @@ MOCKSCRIPT
 #!/usr/bin/env bash
 echo "\$@" >> "\$MOCK_DIR/codex_calls.log"
 pwd >> "\$MOCK_DIR/codex_cwd.log"
-echo "\$(date +%s.%N) pid=\$\$ ppid=\$PPID sid=\$(ps -o sid= -p \$\$)" >> "\$MOCK_DIR/codex_trace.log"
 cat > "\$MOCK_DIR/codex_stdin.log"
 
 if [[ -f "\$MOCK_DIR/codex_exit_code" ]]; then
@@ -265,16 +264,8 @@ setup_repo() {
 }
 
 run_review() {
-    local rc=0
     PATH="$MOCK_DIR:$PATH" MOCK_DIR="$MOCK_DIR" CODEX_REVIEW_STATE_DIR="$MOCK_DIR/state" \
-        timeout "$INVOCATION_TIMEOUT" bash "$SCRIPT" 42 "$@" || rc=$?
-    if [[ $rc -eq 124 ]]; then
-        { echo "DIAG run_review timed out"; ps -eo pid,ppid,pgid,sid,stat,etime,args --forest | tail -60
-          find "$MOCK_DIR/state" -maxdepth 2 -exec ls -ld {} + 2>&1
-          for f in "$MOCK_DIR"/state/*/log "$MOCK_DIR"/state/*/pid "$MOCK_DIR"/state/*/exit; do echo "== $f"; cat "$f" 2>&1; done
-          echo "== codex_calls"; cat "$MOCK_DIR/codex_calls.log" 2>&1; } >&2
-    fi
-    return $rc
+        timeout "$INVOCATION_TIMEOUT" bash "$SCRIPT" 42 "$@"
 }
 
 # --- Test 1: cap reached ---
@@ -1197,9 +1188,23 @@ cleanup; MOCK_DIR=""; REPO_DIR=""
 
 # --- Test: two concurrent invocations for the same PR/head/mode race for one
 # job instead of both launching a worker (the job dir claim must be atomic) ---
-info "Test: concurrent invocations race for one job, not two"
+# Run twice: once with the system mkdir, and once with a mkdir that, like
+# uutils coreutils 0.10 (the default on Ubuntu 26.04, hence on GitHub's
+# ubuntu-latest), is NOT exclusive: a racing `mkdir DIR` of an existing dir
+# can succeed. The script must not rely on mkdir alone to elect the owner.
+for race_mode in system-mkdir non-exclusive-mkdir; do
+info "Test: concurrent invocations race for one job, not two ($race_mode)"
 setup_repo
 setup_mock_gh
+if [[ "$race_mode" == non-exclusive-mkdir ]]; then
+    cat > "$MOCK_DIR/mkdir" << MOCKSCRIPT
+#!/usr/bin/env bash
+# Succeeds when the directory already exists, as a racing uutils mkdir can.
+PATH="\${PATH#$MOCK_DIR:}"
+exec mkdir -p "\$@"
+MOCKSCRIPT
+    chmod +x "$MOCK_DIR/mkdir"
+fi
 # Gate codex instead of sleeping a fixed 2s: with a fixed sleep, a racer that
 # starts late (a slow CI runner) can reach its mkdir after the first job has
 # finished and removed its dir, claim a fresh job and run a second codex. The
@@ -1249,7 +1254,7 @@ codex_calls=$(wc -l < "$MOCK_DIR/codex_calls.log" 2>/dev/null || echo 0)
 if [[ "$codex_calls" -eq 1 ]]; then
     pass "codex was invoked exactly once across both racing invocations"
 else
-    fail "Expected exactly 1 codex invocation, got: $codex_calls DIAG: $(cat "$MOCK_DIR/codex_trace.log" "$MOCK_DIR/codex_cwd.log") OUT1: $race_out1 OUT2: $race_out2 POSTS: $(cat "$MOCK_DIR/post_calls.log")"
+    fail "Expected exactly 1 codex invocation, got: $codex_calls"
 fi
 post_count=$(wc -l < "$MOCK_DIR/post_calls.log" 2>/dev/null || echo 0)
 if [[ "$post_count" -eq 1 ]]; then
@@ -1272,6 +1277,7 @@ else
     fail "Expected no leftover job dir under $MOCK_DIR/state"
 fi
 cleanup; MOCK_DIR=""; REPO_DIR=""
+done
 
 # --- Test: pid is persisted via a temp file + rename, never a bare redirect ---
 # Regression guard for the atomic-pid-write fix: `echo "$X" > "$JOBDIR/pid"`
