@@ -265,8 +265,16 @@ setup_repo() {
 }
 
 run_review() {
+    local rc=0
     PATH="$MOCK_DIR:$PATH" MOCK_DIR="$MOCK_DIR" CODEX_REVIEW_STATE_DIR="$MOCK_DIR/state" \
-        timeout "$INVOCATION_TIMEOUT" bash "$SCRIPT" 42 "$@"
+        timeout "$INVOCATION_TIMEOUT" bash "$SCRIPT" 42 "$@" || rc=$?
+    if [[ $rc -eq 124 ]]; then
+        { echo "DIAG run_review timed out"; ps -eo pid,ppid,pgid,sid,stat,etime,args --forest | tail -60
+          find "$MOCK_DIR/state" -maxdepth 2 -exec ls -ld {} + 2>&1
+          for f in "$MOCK_DIR"/state/*/log "$MOCK_DIR"/state/*/pid "$MOCK_DIR"/state/*/exit; do echo "== $f"; cat "$f" 2>&1; done
+          echo "== codex_calls"; cat "$MOCK_DIR/codex_calls.log" 2>&1; } >&2
+    fi
+    return $rc
 }
 
 # --- Test 1: cap reached ---
